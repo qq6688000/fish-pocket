@@ -1258,8 +1258,12 @@ private struct AddProviderSheet: View {
                                 .navigationBarTitleDisplayMode(.inline)
                                 .keyboardDoneButton()
                         }
+                        NavigationLink("登录 WorkBuddy 账号") {
+                            WorkBuddyLoginView()
+                                .navigationBarTitleDisplayMode(.inline)
+                        }
                     } footer: {
-                        Text("中转站、自部署服务等兼容 OpenAI 或 Anthropic 协议的接口。")
+                        Text("自定义 API 用于中转站、自部署服务等兼容 OpenAI 或 Anthropic 协议的接口；WorkBuddy 走官方订阅登录，登录后自动配置模型。")
                     }
                     .groupedRow()
                 }
