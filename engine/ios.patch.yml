@@ -42,6 +42,22 @@
   config:
     documentsDirectory: !!js process.env.DSH_IOS_DOCUMENTS
 
+# 预置第三方网关模板：WorkBuddy / Trae 订阅网关（OpenAI/Anthropic 兼容）。
+# 开箱在「模型」页出现，用户只需填网关 baseURL + 模型；apiKeyEnv 预置便于凭据管理。
+# route 名小写连字符；llm-pi-ai 的 resolveProfiles 用 deferred 校验，缺 baseURL
+# 不阻塞启动，用户配置后即可服务。
+- id: llm-pi-ai
+  config:
+    providers:
+      workbuddy-gateway:
+        displayName: WorkBuddy 网关
+        api: openai-completions
+        apiKeyEnv: WORKBUDDY_API_KEY
+      trae-gateway:
+        displayName: Trae 网关
+        api: anthropic-messages
+        apiKeyEnv: TRAE_API_KEY
+
 - insert:
     - id: subprocess-ios
       name: ./plugins/subprocess-ios/index.mjs
