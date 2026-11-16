@@ -20,19 +20,6 @@ struct VendorSignInWeb: UIViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
-    static func clearCookies(hosts: [String]) {
-        let store = WKWebsiteDataStore.default().httpCookieStore
-        store.getAllCookies { cookies in
-            for cookie in cookies where hosts.contains(where: { cookie.domain.contains($0) }) {
-                store.delete(cookie)
-            }
-            for host in hosts {
-                HTTPCookieStorage.shared.cookies(for: URL(string: "https://\(host)") ?? URL(string: "https://localhost")!)?
-                    .forEach(HTTPCookieStorage.shared.deleteCookie)
-            }
-        }
-    }
-
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         // The vendor's page may open its own sign-in popup; keep it in this web view.

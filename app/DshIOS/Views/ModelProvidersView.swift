@@ -1330,7 +1330,8 @@ struct PresetProviderForm: View {
                     Button("重新登录") { signedInCredential = nil; signingIn = true }
                 } else {
                     Button {
-                        VendorSignInWeb.clearCookies(hosts: [preset.signInURL.host ?? ""])
+                        // Straight to the sheet: clearing cookies first waited on a WebKit
+                        // callback inside the tap, so a slow store left the page stuck.
                         signingIn = true
                     } label: {
                         Label("登录 \(preset.name)", systemImage: "person.badge.key")
