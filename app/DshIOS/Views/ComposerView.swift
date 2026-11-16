@@ -629,12 +629,20 @@ struct ComposerView: View {
     /// A sheet is gone: run what it left behind; the keyboard returns if `refocus` says so and no picker took over.
     private func sheetClosed() {
         sheetUp.wrappedValue = false
-        afterSheet?()
+        let next = afterSheet
         afterSheet = nil
         // A picker that took over decides when it closes.
-        guard !pickerUp else { return }
-        if refocus && !showPermissions { focused = true }
-        refocus = false
+        if !pickerUp {
+            if refocus && !showPermissions { focused = true }
+            refocus = false
+        }
+        // The picker presents only once this sheet's dismissal has finished; opening it from
+        // the same run loop turn leaves it attached to a view that is going away.
+        guard let next else { return }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(120))
+            next()
+        }
     }
 
     private var pickerUp: Bool { showPhotos || showCamera || showFiles || showModels }

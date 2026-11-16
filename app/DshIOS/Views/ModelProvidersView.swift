@@ -1248,6 +1248,23 @@ private struct AddProviderSheet: View {
                 }
                 if let piAi {
                     Section {
+                        ForEach(ProviderPreset.all) { preset in
+                            NavigationLink(preset.name) {
+                                PresetProviderForm(preset: preset, model: model, namespace: piAi, protocols: protocols, reasoningLevels: app.settings.graph("llm-pi-ai").map(reasoningLevelChoices) ?? [], onAdded: { dismiss() })
+                                    .navigationTitle(preset.name)
+                                    .navigationBarTitleDisplayMode(.inline)
+                                    .keyboardDoneButton()
+                            }
+                        }
+                    } header: {
+                        Text("订阅账号")
+                    } footer: {
+                        Text("已订阅的服务：地址与协议已填好，粘贴令牌即可。")
+                    }
+                    .groupedRow()
+                }
+                if let piAi {
+                    Section {
                         NavigationLink("自定义 API") {
                             CustomProviderForm(model: model, namespace: piAi, protocols: protocols, reasoningLevels: app.settings.graph("llm-pi-ai").map(reasoningLevelChoices) ?? [], onAdded: { dismiss() })
                                 .navigationTitle("自定义 API")
@@ -1272,6 +1289,163 @@ private struct AddProviderSheet: View {
         .onAppear {
             if addable == nil { addable = model.rows.filter { !$0.configured && app.settings.serves($0.settingsNs) } }
         }
+    }
+}
+
+/// A [`ProviderPreset`] as a page: the address and protocol are fixed and shown, the user
+/// pastes the token under the vendor's own name, then picks the models to serve.
+struct PresetProviderForm: View {
+    @EnvironmentObject private var app: AppModel
+    @Environment(\.openURL) private var openURL
+    @ObservedObject var model: ModelProvidersModel
+    let preset: ProviderPreset
+    let namespace: JSON
+    let protocols: [String]
+    let reasoningLevels: [String]
+    let onAdded: () -> Void
+
+    @State private var keyDraft = ""
+    @State private var models: [JSON] = []
+    @State private var busy = false
+    @State private var failure: String?
+    @State private var choosingModels = false
+    /// The profile write landed; only the credential can still be outstanding.
+    @State private var committedRoute: String?
+
+    private var route: String { committedRoute ?? preset.id }
+    private var keyValue: String { keyDraft.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var keyFailure: String? { apiKeyFailure(keyDraft) }
+    private var modelProblem: String? { modelFailure(.array(models), checkReasoning: !reasoningLevels.isEmpty) }
+    private var canContinue: Bool { !keyValue.isEmpty && keyFailure == nil && !busy }
+    private var locked: Bool { busy || committedRoute != nil || !app.settings.writable }
+
+    var body: some View {
+        Form {
+            Section {
+                LabeledContent("API 地址", value: preset.baseURL)
+                    .font(.footnote)
+                LabeledContent("协议", value: protocolLabel(preset.api))
+                    .font(.footnote)
+            } footer: {
+                Text(preset.note)
+            }
+            .groupedRow()
+            Section {
+                APIKeyField(placeholder: preset.tokenHint, text: $keyDraft).disabled(locked)
+                if let keyFailure { Text(keyFailure).font(.caption).foregroundStyle(Palette.removed) }
+                if let page = preset.tokenPage {
+                    Button {
+                        openURL(page)
+                    } label: {
+                        Label("打开 \(preset.name) 获取 \(preset.tokenLabel)", systemImage: "safari")
+                    }
+                    .disabled(busy)
+                }
+            } header: {
+                Text(preset.tokenLabel)
+            } footer: {
+                Text("令牌只保存在本机引擎里，读取接口不会返回它。")
+            }
+            .groupedRow()
+            if let failure {
+                Section { Text(failure).font(.footnote).foregroundStyle(Palette.removed) }.groupedRow()
+            }
+            Section {
+                NavigationLink {
+                    modelsStep
+                } label: {
+                    LabeledContent("模型", value: models.isEmpty ? String(localized: "未添加") : "\(models.count)")
+                }
+            } footer: {
+                Text("目录里没有模型名时手动添加，写服务端实际接受的 id。")
+            }
+            .groupedRow()
+        }
+        .tint(Palette.ink)
+        .groupedList()
+        .scrollDismissesKeyboard(.interactively)
+        .navigationDestination(isPresented: $choosingModels) { modelsStep }
+    }
+
+    private var modelsStep: some View {
+        Form {
+            if let failure {
+                Section { Text(failure).font(.footnote).foregroundStyle(Palette.removed) }.groupedRow()
+            }
+            ModelCatalogSection(
+                models: models,
+                overridden: nil,
+                autoFetch: true,
+                family: .piAi,
+                defaultContextWindow: nil,
+                defaultMaxTokens: nil,
+                defaultInput: nil,
+                reasoningLevels: reasoningLevels,
+                disabled: locked,
+                probe: ModelProbe(
+                    settingsNs: "llm-pi-ai",
+                    baseURL: preset.baseURL,
+                    api: preset.api,
+                    apiKey: keyValue.isEmpty ? nil : keyValue,
+                    blocked: keyFailure
+                ),
+                loadCatalog: false,
+                onChange: { models = $0 },
+                onReset: {}
+            )
+            if !models.isEmpty, let modelProblem {
+                Section { Text(modelProblem).font(.footnote).foregroundStyle(Palette.waiting) }.groupedRow()
+            }
+        }
+        .tint(Palette.ink)
+        .groupedList()
+        .navigationTitle("选择模型")
+        .navigationBarTitleDisplayMode(.inline)
+        .keyboardDoneButton()
+        .interactiveDismissDisabled(true)
+        .saveToolbar(canSave: !models.isEmpty && modelProblem == nil && !busy && app.settings.writable, saving: busy) {
+            Task { await create() }
+        }
+    }
+
+    private func create() async {
+        busy = true
+        failure = nil
+        defer { busy = false }
+        let target = route
+        let keyRef = deriveKeyRef(target)
+        if committedRoute == nil {
+            let profile: [String: JSON] = [
+                "api": .string(preset.api),
+                "baseURL": .string(preset.baseURL),
+                "models": .array(models),
+                "displayName": .string(preset.name),
+                "apiKeyEnv": .string(keyRef),
+            ]
+            do {
+                let expected = namespace["revision"].int
+                _ = try await app.settings.mutate("llm-pi-ai", [.set(["providers", target], .object(profile))], expectedRevision: expected)
+                committedRoute = target
+            } catch {
+                failure = describeFailure(error)
+                Haptics.error()
+                return
+            }
+        }
+        if !keyValue.isEmpty {
+            do {
+                try await app.settings.setCredential(keyRef, keyValue)
+            } catch {
+                failure = describeFailure(error)
+                Haptics.error()
+                return
+            }
+            keyDraft = ""
+        }
+        Haptics.success()
+        onAdded()
+        await model.load(app)
+        app.showToast(String(localized: "已保存 \(preset.name)。"))
     }
 }
 
