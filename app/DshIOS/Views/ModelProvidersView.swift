@@ -1250,7 +1250,7 @@ private struct AddProviderSheet: View {
                     Section {
                         ForEach(ProviderPreset.all) { preset in
                             NavigationLink(preset.name) {
-                                PresetProviderForm(preset: preset, model: model, namespace: piAi, protocols: protocols, reasoningLevels: app.settings.graph("llm-pi-ai").map(reasoningLevelChoices) ?? [], onAdded: { dismiss() })
+                                PresetProviderForm(model: model, preset: preset, namespace: piAi, protocols: protocols, reasoningLevels: app.settings.graph("llm-pi-ai").map(reasoningLevelChoices) ?? [], onAdded: { dismiss() })
                                     .navigationTitle(preset.name)
                                     .navigationBarTitleDisplayMode(.inline)
                                     .keyboardDoneButton()
