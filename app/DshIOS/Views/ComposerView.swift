@@ -296,33 +296,27 @@ struct ComposerView: View {
             }
             .ignoresSafeArea()
         }
-        // 文件 goes through our own chooser: a sheet of its own can be presented reliably,
-        // and the system picker inside it is reached only after that sheet is up.
+        // 文件 opens a document picker this view owns and presents itself: the SwiftUI
+        // modifier can only present once, and drops the request while the ＋ tray is still
+        // dismissing — the reason nothing happened after choosing a file.
+        .sheet(isPresented: $choosingFiles) {
+            DocumentPickerView { urls in
+                choosingFiles = false
+                let target = composer
+                Task { @MainActor in
+                    if let refusal = await target.addFiles(urls) { app.showToast(refusal) }
+                }
+            } onFail: { message in
+                choosingFiles = false
+                if !message.isEmpty { app.showToast(message) }
+            }
+            .ignoresSafeArea()
+        }
         .compatOnChange(of: showFiles) { _, wanted in
             guard wanted else { return }
             showFiles = false
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { choosingFiles = true }
-        }
-        .sheet(isPresented: $choosingFiles) {
-            FileChooserSheet(composer: composer) { }
-                .environmentObject(app)
-        }
-        .fileImporter(isPresented: $showFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
-            switch result {
-            case .success(let urls):
-                let folders = urls.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
-                if !folders.isEmpty { app.showToast(String(localized: "只有桌面端支持添加文件夹，请添加单个文件")) }
-                let picked = urls.filter { !folders.contains($0) }
-                let target = composer
-                Task { @MainActor in
-                    if let refusal = await target.addFiles(picked) { app.showToast(refusal) }
-                }
-            case .failure(let error):
-                // A dismissed picker is not a failure worth a toast.
-                if (error as NSError).code != NSUserCancelledError {
-                    app.showToast(String(localized: "无法读取所选文件：\(error.localizedDescription)"))
-                }
-            }
+            // Let the tray's dismissal finish first: 0.35 s is UIKit's sheet animation.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { choosingFiles = true }
         }
         .sheet(isPresented: $showModels) { ModelSearchSheet(model: model, context: context) }
         .sheet(isPresented: trayShown(sizeClass != .regular), onDismiss: sheetClosed) { tray }
