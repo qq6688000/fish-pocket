@@ -45,7 +45,10 @@ struct ComposerDrop: ViewModifier {
             }
         }
         guard !files.isEmpty else { return }
-        composer.addFiles(files)
+        let target = composer
+        Task { @MainActor in
+            if let refusal = await target.addFiles(files) { app.showToast(refusal) }
+        }
         for file in files { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
     }
 

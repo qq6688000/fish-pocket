@@ -1,57 +1,73 @@
 import Foundation
 
-/// A subscription vendor the user already pays for, reached with a token from its own
-/// client. Added from 模型 → 添加模型提供商 as a custom `llm-pi-ai` route: the address and
-/// protocol are filled in, so only the token is left to paste. The credential header
-/// follows from the protocol in pi-ai itself (`x-api-key` for anthropic-messages,
-/// `Authorization: Bearer` otherwise), so no header is declared here.
+/// A subscription vendor reached from 模型 → 添加模型提供商 → 订阅账号.
+///
+/// None of these three publishes an OAuth authorization-code flow a third-party app could
+/// complete, so there is nothing to redirect back to the app. What each *does* have is a
+/// browser sign-in that issues a session cookie; the sign-in sheet runs that page inside the
+/// app and reads the cookie once the page is signed in. That cookie is then used as the
+/// route's API key — the credential header follows from the protocol.
 struct ProviderPreset: Identifiable {
     let id: String
     let name: String
-    let baseURL: String
-    /// `llm-pi-ai` protocol id.
+    /// `llm-pi-ai` protocol id: decides where the credential goes.
     let api: String
-    /// Where the user gets a token, opened in Safari.
-    let tokenPage: URL?
+    /// What an API key field is called for this vendor.
     let tokenLabel: String
-    let tokenHint: String
+    /// Where the in-app sign-in starts.
+    let signInURL: URL
+    /// Host prefix the page must reach before a cookie counts as signed in.
+    let signedInPrefix: String
+    /// Session cookie names, most specific first.
+    let cookieNames: [String]
+    /// The model API this vendor exposes, if any (`nil`: cookie only, no public route).
+    let baseURL: String?
+    /// Where the user creates an API key instead, if the vendor has one.
+    let keyPage: URL?
     let note: String
 
     static let all: [ProviderPreset] = [workbuddy, trae, raccoon]
 
-    /// Tencent's CodeBuddy/WorkBuddy: the personal console mints the key.
+    /// Tencent CodeBuddy/WorkBuddy: OneID sign-in, and separately a personal console that
+    /// mints a real API key — the only one of the three that can always serve a request.
     static let workbuddy = ProviderPreset(
         id: "workbuddy",
         name: "WorkBuddy",
-        baseURL: "https://copilot.tencent.com",
         api: "anthropic-messages",
-        tokenPage: URL(string: "https://copilot.tencent.com/profile/keys"),
         tokenLabel: "API Key",
-        tokenHint: "sk-…",
-        note: "在 copilot.tencent.com 个人控制台生成 Key 后粘贴。地址与协议已填好；点“模型”可从服务端拉取列表，拉不到就手动填模型 id。"
+        signInURL: URL(string: "https://www.workbuddy.cn/login/?platform=website&state=2&product=workbuddy")!,
+        signedInPrefix: "https://copilot.tencent.com",
+        cookieNames: ["codebuddy_session", "session", "session_2", "oneid_token"],
+        baseURL: "https://copilot.tencent.com",
+        keyPage: URL(string: "https://copilot.tencent.com/profile/keys"),
+        note: "可在应用内登录并带回会话凭据；也可直接到个人控制台生成 API Key，那个更稳、不会过期。"
     )
 
-    /// Trae CN: the client's own Cloud-IDE-JWT.
+    /// Trae CN: ByteDance Passport sign-in. Its model routes are the IDE's own.
     static let trae = ProviderPreset(
         id: "trae",
         name: "Trae CN",
-        baseURL: "https://trae-api-cn.mchost.guru/api/agent/v3",
         api: "openai-chat-completions",
-        tokenPage: URL(string: "https://www.trae.cn"),
         tokenLabel: "Cloud-IDE-JWT",
-        tokenHint: "eyJhbGciOi…",
-        note: "Trae 没有开放 API Key，只能填客户端令牌，过期后需重新获取。模型名请按客户端实际提供的填写。"
+        signInURL: URL(string: "https://www.trae.cn")!,
+        signedInPrefix: "https://www.trae.cn",
+        cookieNames: ["trae_session", "sessionid", "SessionID"],
+        baseURL: "https://trae-api-cn.mchost.guru/api/agent/v3",
+        keyPage: nil,
+        note: "可在应用内登录并带回会话凭据。Trae 未开放 API，模型调用走客户端专用接口，可能需要客户端令牌。"
     )
 
-    /// SenseTime's Raccoon: the web workspace's own session token.
+    /// SenseTime Raccoon: SMS or WeChat sign-in on the web workspace.
     static let raccoon = ProviderPreset(
         id: "raccoon",
         name: "小浣熊（商汤）",
-        baseURL: "https://xiaohuanxiong.com/api/web/b/v1",
         api: "openai-chat-completions",
-        tokenPage: URL(string: "https://www.xiaohuanxiong.com/work"),
         tokenLabel: "xhx_token",
-        tokenHint: "令牌",
-        note: "小浣熊没有开放 Key，令牌需从登录后的网页会话取得，过期后需重新获取。模型名请按实际可用的填写。"
+        signInURL: URL(string: "https://www.xiaohuanxiong.com/work")!,
+        signedInPrefix: "https://www.xiaohuanxiong.com/work",
+        cookieNames: ["xhx_token", "raccoon_token"],
+        baseURL: "https://xiaohuanxiong.com",
+        keyPage: nil,
+        note: "可在应用内登录并带回会话凭据。小浣熊没有对外的模型接口，凭据只能用于其自身网页会话。"
     )
 }

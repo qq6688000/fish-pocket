@@ -294,10 +294,21 @@ struct ComposerView: View {
             .ignoresSafeArea()
         }
         .fileImporter(isPresented: $showFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
-            guard case .success(let urls) = result else { return }
-            let folders = urls.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
-            if !folders.isEmpty { app.showToast(String(localized: "只有桌面端支持添加文件夹，请添加单个文件")) }
-            composer.addFiles(urls.filter { !folders.contains($0) })
+            switch result {
+            case .success(let urls):
+                let folders = urls.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+                if !folders.isEmpty { app.showToast(String(localized: "只有桌面端支持添加文件夹，请添加单个文件")) }
+                let picked = urls.filter { !folders.contains($0) }
+                let target = composer
+                Task { @MainActor in
+                    if let refusal = await target.addFiles(picked) { app.showToast(refusal) }
+                }
+            case .failure(let error):
+                // A dismissed picker is not a failure worth a toast.
+                if (error as NSError).code != NSUserCancelledError {
+                    app.showToast(String(localized: "无法读取所选文件：\(error.localizedDescription)"))
+                }
+            }
         }
         .sheet(isPresented: $showModels) { ModelSearchSheet(model: model, context: context) }
         .sheet(isPresented: trayShown(sizeClass != .regular), onDismiss: sheetClosed) { tray }
@@ -322,8 +333,9 @@ struct ComposerView: View {
         // A popover has no `onDismiss`. A picker presented before its dismissal ends never shows.
         .compatOnChange(of: showTray) { _, open in
             guard !open, sizeClass == .regular else { return }
-            Task {
+            Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(450))
+                guard afterSheet != nil || !pickerUp else { return }
                 sheetClosed()
             }
         }
@@ -639,8 +651,10 @@ struct ComposerView: View {
         // The picker presents only once this sheet's dismissal has finished; opening it from
         // the same run loop turn leaves it attached to a view that is going away.
         guard let next else { return }
+        // UIKit's sheet dismissal runs ~350 ms; presenting inside it is dropped without a retry.
         Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(120))
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !pickerUp else { return }
             next()
         }
     }

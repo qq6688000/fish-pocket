@@ -1292,8 +1292,8 @@ private struct AddProviderSheet: View {
     }
 }
 
-/// A [`ProviderPreset`] as a page: the address and protocol are fixed and shown, the user
-/// pastes the token under the vendor's own name, then picks the models to serve.
+/// A [`ProviderPreset`] as a page: sign in inside the app (the session cookie is read back),
+/// or paste an API key where the vendor issues one — then pick the models this route serves.
 struct PresetProviderForm: View {
     @EnvironmentObject private var app: AppModel
     @Environment(\.openURL) private var openURL
@@ -1309,42 +1309,53 @@ struct PresetProviderForm: View {
     @State private var busy = false
     @State private var failure: String?
     @State private var choosingModels = false
+    @State private var signingIn = false
+    @State private var signedInCredential: String?
     /// The profile write landed; only the credential can still be outstanding.
     @State private var committedRoute: String?
 
     private var route: String { committedRoute ?? preset.id }
-    private var keyValue: String { keyDraft.trimmingCharacters(in: .whitespacesAndNewlines) }
-    private var keyFailure: String? { apiKeyFailure(keyDraft) }
+    private var keyValue: String { (signedInCredential ?? keyDraft).trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var keyFailure: String? { signedInCredential != nil ? nil : apiKeyFailure(keyDraft) }
     private var modelProblem: String? { modelFailure(.array(models), checkReasoning: !reasoningLevels.isEmpty) }
-    private var canContinue: Bool { !keyValue.isEmpty && keyFailure == nil && !busy }
+    private var ready: Bool { !keyValue.isEmpty && keyFailure == nil && !models.isEmpty && modelProblem == nil && !busy && app.settings.writable }
     private var locked: Bool { busy || committedRoute != nil || !app.settings.writable }
 
     var body: some View {
         Form {
             Section {
-                LabeledContent("API 地址", value: preset.baseURL)
-                    .font(.footnote)
-                LabeledContent("协议", value: protocolLabel(preset.api))
-                    .font(.footnote)
+                if signedInCredential != nil {
+                    Label("已登录，凭据已取得", systemImage: "checkmark.seal")
+                        .font(.footnote)
+                    Button("重新登录") { signedInCredential = nil; signingIn = true }
+                } else {
+                    Button {
+                        VendorSignInWeb.clearCookies(hosts: [preset.signInURL.host ?? ""])
+                        signingIn = true
+                    } label: {
+                        Label("登录 \(preset.name)", systemImage: "person.badge.key")
+                    }
+                    .disabled(busy)
+                }
             } footer: {
                 Text(preset.note)
             }
             .groupedRow()
             Section {
-                APIKeyField(placeholder: preset.tokenHint, text: $keyDraft).disabled(locked)
+                APIKeyField(placeholder: preset.tokenLabel, text: $keyDraft).disabled(locked || signedInCredential != nil)
                 if let keyFailure { Text(keyFailure).font(.caption).foregroundStyle(Palette.removed) }
-                if let page = preset.tokenPage {
+                if let page = preset.keyPage {
                     Button {
                         openURL(page)
                     } label: {
-                        Label("打开 \(preset.name) 获取 \(preset.tokenLabel)", systemImage: "safari")
+                        Label("打开 \(preset.name) 获取 API Key", systemImage: "safari")
                     }
                     .disabled(busy)
                 }
             } header: {
-                Text(preset.tokenLabel)
+                Text("或直接填写 \(preset.tokenLabel)")
             } footer: {
-                Text("令牌只保存在本机引擎里，读取接口不会返回它。")
+                Text("凭据只保存在本机引擎里，读取接口不会返回它。")
             }
             .groupedRow()
             if let failure {
@@ -1365,6 +1376,18 @@ struct PresetProviderForm: View {
         .groupedList()
         .scrollDismissesKeyboard(.interactively)
         .navigationDestination(isPresented: $choosingModels) { modelsStep }
+        .sheet(isPresented: $signingIn) {
+            VendorSignInSheet(preset: preset) { value in
+                signedInCredential = value
+                Haptics.success()
+                app.showToast(String(localized: "已取得 \(preset.name) 凭据。"))
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("完成") { Task { await create() } }.disabled(!ready)
+            }
+        }
     }
 
     private var modelsStep: some View {
@@ -1382,13 +1405,15 @@ struct PresetProviderForm: View {
                 defaultInput: nil,
                 reasoningLevels: reasoningLevels,
                 disabled: locked,
-                probe: ModelProbe(
-                    settingsNs: "llm-pi-ai",
-                    baseURL: preset.baseURL,
-                    api: preset.api,
-                    apiKey: keyValue.isEmpty ? nil : keyValue,
-                    blocked: keyFailure
-                ),
+                probe: preset.baseURL.map { base in
+                    ModelProbe(
+                        settingsNs: "llm-pi-ai",
+                        baseURL: base,
+                        api: preset.api,
+                        apiKey: keyValue.isEmpty ? nil : keyValue,
+                        blocked: keyFailure
+                    )
+                },
                 loadCatalog: false,
                 onChange: { models = $0 },
                 onReset: {}
@@ -1415,16 +1440,15 @@ struct PresetProviderForm: View {
         let target = route
         let keyRef = deriveKeyRef(target)
         if committedRoute == nil {
-            let profile: [String: JSON] = [
+            var profile: [String: JSON] = [
                 "api": .string(preset.api),
-                "baseURL": .string(preset.baseURL),
                 "models": .array(models),
                 "displayName": .string(preset.name),
                 "apiKeyEnv": .string(keyRef),
             ]
+            if let base = preset.baseURL { profile["baseURL"] = .string(base) }
             do {
-                let expected = namespace["revision"].int
-                _ = try await app.settings.mutate("llm-pi-ai", [.set(["providers", target], .object(profile))], expectedRevision: expected)
+                _ = try await app.settings.mutate("llm-pi-ai", [.set(["providers", target], .object(profile))], expectedRevision: namespace["revision"].int)
                 committedRoute = target
             } catch {
                 failure = describeFailure(error)

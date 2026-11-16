@@ -710,24 +710,32 @@ final class ComposerModel: ObservableObject {
     var remainingImageSlots: Int { max(0, imageLimits.maxImagesPerMessage - attachments.filter(\.isImage).count) }
 
     /// Files from the Files app: images join as images, everything else uploads now.
-    func addFiles(_ urls: [URL]) {
-        var refusal: String?
-        for url in urls {
-            let scoped = url.startAccessingSecurityScopedResource()
-            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-            let type = UTType(filenameExtension: url.pathExtension)
-            if type?.conforms(to: .image) == true, let data = try? Data(contentsOf: url), DraftImage.isImage(data) {
-                if let reason = addImage(data: data, name: url.lastPathComponent) { refusal = reason }
-                continue
+    /// Files from the Files app: images join as images, everything else uploads now. Reading and
+    /// copying run off the main actor — a pick may be tens of megabytes, or an iCloud item that
+    /// must download first — so the attachment rail keeps moving. Returns the refusal to show.
+    @discardableResult
+    nonisolated func addFiles(_ urls: [URL]) async -> String? {
+        await Task.detached(priority: .userInitiated) { [urls] () -> String? in
+            var refused: String?
+            for url in urls {
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                let name = url.lastPathComponent
+                if UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) == true,
+                   let data = try? Data(contentsOf: url), DraftImage.isImage(data) {
+                    if let reason = await MainActor.run(body: { self.addImage(data: data, name: name) }) { refused = reason }
+                    continue
+                }
+                // A private copy: the security-scoped URL may not outlive the picker, and retries reread it.
+                do {
+                    let copy = try PickedMovie.stage(url)
+                    await MainActor.run { self.addStagedFile(copy) }
+                } catch {
+                    refused = String(localized: "「\(name)」读取失败：\(error.localizedDescription)")
+                }
             }
-            // A private copy: the security-scoped URL may not outlive the picker, and retries reread it.
-            do {
-                addStagedFile(try PickedMovie.stage(url))
-            } catch {
-                refusal = error.localizedDescription
-            }
-        }
-        if let refusal { app.showToast(refusal) }
+            return refused
+        }.value
     }
 
     /// A file already copied into its own `uploads/` folder (`PickedMovie.stage`): it uploads
