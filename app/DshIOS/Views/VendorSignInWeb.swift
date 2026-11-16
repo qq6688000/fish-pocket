@@ -15,6 +15,8 @@ struct VendorSignInWeb: UIViewRepresentable {
     /// Cookie names that carry the session, most specific first.
     let cookieNames: [String]
     let onCredential: (String) -> Void
+    /// Reached the signed-in page but no session cookie could be read.
+    var onStalled: (() -> Void)?
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -60,7 +62,10 @@ struct VendorSignInWeb: UIViewRepresentable {
 
         /// Read the vendor's session cookie once the page has landed on its signed-in view.
         private func collect(from webView: WKWebView) {
-            guard !collected, let landed = webView.url?.absoluteString, landed.hasPrefix(owner.signedInPrefix) else { return }
+            guard !collected, let landed = webView.url?.absoluteString, landed.hasPrefix(owner.signedInPrefix) else {
+                if webView.url?.absoluteString.hasPrefix(owner.signedInPrefix) == true { owner.onStalled?() }
+                return
+            }
             collected = true
             webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { [weak self] cookies in
                 guard let self else { return }
@@ -88,22 +93,38 @@ struct VendorSignInSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
-    /// The page has loaded at least once: from then on a cookie that never appears is a
-    /// sign-in that did not finish, which the user has to be told rather than left waiting.
-    @State private var loadedOnce = false
-    @State private var showingHelp = false
+    /// Said under the title when the page reached its signed-in destination without a cookie.
+    @State private var status: String?
+    @State private var webID = UUID()
 
     var body: some View {
         NavigationStack {
-            VendorSignInWeb(
-                url: preset.signInURL,
-                signedInPrefix: preset.signedInPrefix,
-                cookieNames: preset.cookieNames
-            ) { value in
-                onCredential(value)
-                dismiss()
+            VStack(spacing: 0) {
+                if let status {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "info.circle").foregroundStyle(Palette.secondary)
+                        Text(status).font(.footnote).foregroundStyle(Palette.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(Palette.control)
+                }
+                VendorSignInWeb(
+                    url: preset.signInURL,
+                    signedInPrefix: preset.signedInPrefix,
+                    cookieNames: preset.cookieNames,
+                    onCredential: { value in
+                        onCredential(value)
+                        dismiss()
+                    },
+                    onStalled: {
+                        status = String(localized: "已进入登录后的页面，但没读到这个平台的会话凭据。改用「打开\(preset.name)获取 API Key」更稳。")
+                    }
+                )
+                .id(webID)
             }
-            .onAppear { loadedOnce = true }
             .ignoresSafeArea(edges: .bottom)
             .navigationTitle(preset.name)
             .navigationBarTitleDisplayMode(.inline)
@@ -111,7 +132,7 @@ struct VendorSignInSheet: View {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
-                        Button("重新加载登录页") { dismiss() }
+                        Button("重新加载登录页") { webID = UUID() }
                         if let page = preset.keyPage {
                             Button("改用 API Key") { openURL(page) }
                         }
