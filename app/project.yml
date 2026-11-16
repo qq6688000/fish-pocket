@@ -123,8 +123,7 @@ targets:
       - package: SwiftTerm
       - package: SwiftMath
       - target: DshLiveActivity
-      # The watch app rides inside the iPhone app and is installed with it.
-      - target: DshWatch
+      # watchOS 10 requires an iOS 17 companion; omit from this iOS 16 build.
     postBuildScripts:
       # CPython's standard library into the bundle (python/lib), and each extension
       # module turned into a framework under Frameworks, as App Store binaries must be:

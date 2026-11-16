@@ -19,17 +19,25 @@ jobs:
       - name: Xcode
         run: xcodebuild -version
       - name: Vendor cache
-        uses: actions/cache@v5
+        id: vendor-cache
+        uses: actions/cache/restore@v5
         with:
           path: vendor
           key: ios16-vendor-${{ hashFiles('scripts/fetch-nodejs-mobile.sh', 'scripts/fetch-python.sh', 'scripts/build-libgit2.sh', 'scripts/build-ffmpeg.sh') }}
       - name: Native dependencies
+        if: steps.vendor-cache.outputs.cache-hit != 'true'
         run: |
           bash scripts/fetch-nodejs-mobile.sh
           bash scripts/fetch-python.sh
           bash scripts/build-libgit2.sh
           bash scripts/fetch-ffmpeg.sh
           bash scripts/check-root-imports.sh
+      - name: Save native dependencies
+        if: steps.vendor-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: vendor
+          key: ios16-vendor-${{ hashFiles('scripts/fetch-nodejs-mobile.sh', 'scripts/fetch-python.sh', 'scripts/build-libgit2.sh', 'scripts/build-ffmpeg.sh') }}
       - name: Engine
         run: bash scripts/build-engine.sh
       - name: Generate project
