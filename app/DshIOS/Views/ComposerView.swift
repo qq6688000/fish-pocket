@@ -231,6 +231,9 @@ struct ComposerView: View {
     @State private var showPhotos = false
     @State private var showCamera = false
     @State private var showFiles = false
+    /// Our own chooser, which does not depend on presenting the system picker out of a
+    /// dismissing sheet (the case where 文件 did nothing at all).
+    @State private var choosingFiles = false
     @State private var showModels = false
     @State private var showPermissions = false
     @State private var showTray = false
@@ -292,6 +295,17 @@ struct ComposerView: View {
                 if let refusal = composer.addImage(image) { app.showToast(refusal) }
             }
             .ignoresSafeArea()
+        }
+        // 文件 goes through our own chooser: a sheet of its own can be presented reliably,
+        // and the system picker inside it is reached only after that sheet is up.
+        .compatOnChange(of: showFiles) { _, wanted in
+            guard wanted else { return }
+            showFiles = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { choosingFiles = true }
+        }
+        .sheet(isPresented: $choosingFiles) {
+            FileChooserSheet(composer: composer) { }
+                .environmentObject(app)
         }
         .fileImporter(isPresented: $showFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             switch result {

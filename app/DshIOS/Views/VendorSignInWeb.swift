@@ -87,7 +87,11 @@ struct VendorSignInSheet: View {
     let onCredential: (String) -> Void
 
     @Environment(\.dismiss) private var dismiss
-    @State private var landed = false
+    @Environment(\.openURL) private var openURL
+    /// The page has loaded at least once: from then on a cookie that never appears is a
+    /// sign-in that did not finish, which the user has to be told rather than left waiting.
+    @State private var loadedOnce = false
+    @State private var showingHelp = false
 
     var body: some View {
         NavigationStack {
@@ -97,14 +101,24 @@ struct VendorSignInSheet: View {
                 cookieNames: preset.cookieNames
             ) { value in
                 onCredential(value)
-                landed = true
                 dismiss()
             }
+            .onAppear { loadedOnce = true }
             .ignoresSafeArea(edges: .bottom)
             .navigationTitle(preset.name)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .primaryAction) {
+                    Menu {
+                        Button("重新加载登录页") { dismiss() }
+                        if let page = preset.keyPage {
+                            Button("改用 API Key") { openURL(page) }
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                }
             }
         }
         .tint(Palette.ink)
