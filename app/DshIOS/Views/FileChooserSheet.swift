@@ -14,7 +14,7 @@ struct FileChooserSheet: View {
     let onPick: () -> Void
 
     @Environment(\.dismiss) private var dismiss
-    @State private var entries: [DirectoryListing.Entry] = []
+    @State private var entries: [DirectoryPickerListing.Entry] = []
     @State private var path: String = EnginePaths.documents
     @State private var stack: [String] = []
     @State private var loading = false
@@ -101,7 +101,7 @@ struct FileChooserSheet: View {
     }
 
     @ViewBuilder
-    private func row(_ entry: DirectoryListing.Entry) -> some View {
+    private func row(_ entry: DirectoryPickerListing.Entry) -> some View {
         Button {
             if entry.isDirectory {
                 stack.append(path)
