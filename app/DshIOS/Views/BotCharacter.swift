@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// A Bot's built-in look: a flat shape with two eyes, drawn here. The ids are the shape names
 /// ds-bot keeps for a Bot (`avatar.shape`), so a look picked here names the same shape there;
