@@ -12,6 +12,11 @@ final class StreamMux: NSObject, @unchecked Sendable, URLSessionWebSocketDelegat
     private var waiters: [CheckedContinuation<Void, Error>] = []
     private var streams: [String: AsyncThrowingStream<JSON, Error>.Continuation] = [:]
     private let lock = NSLock()
+    /// What a reconnect has to replay: the endpoint and args of every stream still wanted.
+    private var opening: [String: (endpoint: String, args: JSON)] = [:]
+    private var reconnectTask: Task<Void, Never>?
+    private var attempts = 0
+    private var keepAliveTask: Task<Void, Never>?
 
     init(client: EngineClient) {
         self.client = client
@@ -28,10 +33,15 @@ final class StreamMux: NSObject, @unchecked Sendable, URLSessionWebSocketDelegat
     func openDuplex(_ endpoint: String, _ args: JSON) -> (items: AsyncThrowingStream<JSON, Error>, send: @Sendable (JSON) async throws -> Void) {
         let streamId = UUID().uuidString.lowercased()
         let items = AsyncThrowingStream<JSON, Error> { continuation in
-            lock.withLock { streams[streamId] = continuation }
+            lock.withLock {
+                streams[streamId] = continuation
+                opening[streamId] = (endpoint, args)
+            }
             continuation.onTermination = { [weak self] reason in
                 guard let self else { return }
-                let wasOpen = self.lock.withLock { self.streams.removeValue(forKey: streamId) != nil }
+                let wasOpen = self.lock.withLock { () -> Bool in
+                    self.opening.removeValue(forKey: streamId) != nil || self.streams.removeValue(forKey: streamId) != nil
+                }
                 if case .cancelled = reason, wasOpen {
                     Task { try? await self.send(["type": "cancel", "streamId": .string(streamId)]) }
                 }
@@ -132,19 +142,81 @@ final class StreamMux: NSObject, @unchecked Sendable, URLSessionWebSocketDelegat
             waiters.removeAll()
             return (all, waiting)
         }
-        continuations.forEach { $0.finish(throwing: error) }
+        // A stream the consumer still wants is reopened on the next socket rather than ended:
+        // a reply in flight is the reason to reconnect, not to surface an error.
+        let resumable = lock.withLock { opening.count }
+        if resumable > 0 {
+            continuations.forEach { $0.finish() }
+        } else {
+            continuations.forEach { $0.finish(throwing: error) }
+        }
         pending.forEach { $0.resume(throwing: error) }
+        scheduleReconnect()
+    }
+
+    /// The socket is gone: connect again after a growing pause and re-open what was wanted.
+    private func scheduleReconnect() {
+        guard reconnectTask == nil else { return }
+        let delay = min(8.0, pow(2.0, Double(min(attempts, 4))))
+        attempts += 1
+        reconnectTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(Int(delay * 400)))
+            guard let self else { return }
+            self.reconnectTask = nil
+            guard !self.lock.withLock({ !self.opening.isEmpty && self.streams.isEmpty }) else { return }
+            await self.reopenAll()
+        }
+    }
+
+    /// Open the shared socket and replay every stream that is still wanted.
+    private func reopenAll() async {
+        do {
+            _ = try await socket()
+            let pending = lock.withLock { opening.map { ($0.key, $0.value) } }
+            for (streamId, spec) in pending {
+                do {
+                    try await send([
+                        "type": "open", "streamId": .string(streamId),
+                        "endpoint": .string(spec.endpoint), "payload": ["args": spec.args],
+                    ])
+                } catch {
+                    break
+                }
+            }
+            attempts = 0
+        } catch {
+            scheduleReconnect()
+        }
     }
 
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
         let pending = lock.withLock { () -> [CheckedContinuation<Void, Error>] in
             guard task === webSocketTask else { return [] }
             opened = true
+            attempts = 0
+            keepAlive()
             let waiting = waiters
             waiters.removeAll()
             return waiting
         }
         pending.forEach { $0.resume() }
+    }
+
+    /// A ping the proxy cannot see as activity for long gets closed; the ping keeps it open.
+    private func keepAlive() {
+        keepAliveTask?.cancel()
+        keepAliveTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(20))
+                guard let self, let task = self.lock.withLock({ self.opened ? self.task : nil }) else { return }
+                do {
+                    try await task.sendPing { _ in }
+                } catch {
+                    self.drop(task, error)
+                    return
+                }
+            }
+        }
     }
 
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
