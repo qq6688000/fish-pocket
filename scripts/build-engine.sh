@@ -44,6 +44,17 @@ find "$nm" -type d \( -name test -o -name tests -o -name __tests__ -o -name docs
 { find "$nm" -type f -size +1k -print0 | xargs -0 file --mime-type 2>/dev/null | grep -E 'application/x-(mach-binary|executable|sharedlib)' || true; } | cut -d: -f1 | while read -r f; do rm -f "$f"; done
 # Bin links into what was pruned above: a dangling link in the bundle fails App Store validation.
 find "$nm" -type l ! -exec test -e {} \; -delete
+# The iOS stand-in for node-addon-require-builtin's prebuilt must be resolvable by name:
+# the engine boots through node-addon-native-custom-loader, which asks for
+# `node-addon-require-builtin-<platform>-<arch>`. npm links this local dependency on a
+# Mac but not under `--os=ios` on Linux (the loader deletes the resulting absent entry),
+# so the engine would die at boot with "No usable native binding found". Copy rather than
+# link: a copy survives packaging, and a missing one stops the build here.
+shim="$out/shims/node-addon-require-builtin-ios-arm64"
+[ -f "$shim/index.js" ] || { echo "build-engine: missing $shim" >&2; exit 1; }
+rm -rf "$nm/node-addon-require-builtin-ios-arm64"
+cp -R "$shim" "$nm/node-addon-require-builtin-ios-arm64"
+[ -f "$nm/node-addon-require-builtin-ios-arm64/index.js" ] || { echo "build-engine: failed to install the iOS require-builtin stand-in" >&2; exit 1; }
 # Apache-2.0 notices a bundled package leaves out of its npm tarball ship beside it.
 for notice in "$src"/notices/*.NOTICE; do
   [ -e "$notice" ] || continue
