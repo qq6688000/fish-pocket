@@ -5,6 +5,7 @@ products=root/'app/build/DerivedData/Build/Products/Release-iphoneos'
 apps=list(products.glob('*.app'))
 assert len(apps)==1,apps
 app=apps[0]
+subprocess.run(['python3',str(root/'scripts/verify-ios16.py'),str(app)],check=True)
 info=plistlib.loads((app/'Info.plist').read_bytes())
 assert info['MinimumOSVersion']=='16.2',info.get('MinimumOSVersion')
 metadata={'revision':subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip(),'minimumOS':info['MinimumOSVersion'],'version':info['CFBundleShortVersionString'],'build':info['CFBundleVersion']}
