@@ -249,8 +249,10 @@ struct ComposerView: View {
     @FocusState private var focused: Bool
 
     private var composer: ComposerModel { model.composer }
+    @State private var composerRevision = 0
 
     var body: some View {
+        let _ = composerRevision
         let trigger = activeTrigger
         VStack(alignment: .leading, spacing: 8) {
             if let trigger {
@@ -258,6 +260,10 @@ struct ComposerView: View {
             }
             field
                 .background(Palette.field, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        }
+        .onReceive(composer.objectWillChange) { _ in
+            // Observe the nested draft directly without creating a model forwarding cycle.
+            composerRevision &+= 1
         }
         .task(id: pendingDraft) {
             guard let pendingDraft else { return }
@@ -381,7 +387,7 @@ struct ComposerView: View {
     private var input: some View {
         // Between three lines and four, whatever the text size.
         let threeLines = UIFont.preferredFont(forTextStyle: .callout).lineHeight * 3.5
-        return TextField(placeholder, text: Bindable(composer).text, axis: .vertical)
+        return TextField(placeholder, text: Binding(get: { composer.text }, set: { composer.text = $0 }), axis: .vertical)
             .font(.callout)
             .lineLimit(1...5)
             .focused($focused)

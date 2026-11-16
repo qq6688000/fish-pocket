@@ -69,7 +69,7 @@ struct BotCharacter: Identifiable {
         BotCharacter(id: "squircle", body: Draw.superellipse(centre: (50, 50), radius: 41, power: 4.2), eyes: Eyes(x: 50, y: 50)),
         BotCharacter(id: "hex", body: Draw.star(points: 3, outer: 45, inner: 45, centre: (50, 50), radius: 10), eyes: Eyes(x: 50, y: 50)),
         BotCharacter(id: "moon",
-                     body: Draw.circle(50, 50, 42).subtracting(Draw.circle(75, 31, 33)),
+                     body: Draw.moon,
                      eyes: Eyes(x: 36, y: 62, gap: 15, width: 8.5, height: 14)),
         BotCharacter(id: "wave", body: Draw.hemmed, eyes: Eyes(x: 50, y: 45)),
         BotCharacter(id: "zed",
@@ -81,11 +81,11 @@ struct BotCharacter: Identifiable {
                      patches: [Patch(path: Path(ellipseIn: CGRect(x: 5, y: 46, width: 90, height: 34)), dark: true, opacity: 0.14)]),
         BotCharacter(id: "plus", body: Draw.join(Draw.box(33, 9, 34, 82, 12), Draw.box(9, 33, 82, 34, 12)), eyes: Eyes(x: 50, y: 50, gap: 18, width: 9.5, height: 16)),
         BotCharacter(id: "magnet",
-                     body: Draw.join(Draw.box(14, 9, 72, 48, 7), Draw.circle(50, 54, 36)).subtracting(Draw.join(Draw.box(38, 0, 24, 50, 0), Draw.circle(50, 50, 12))),
+                     body: Draw.magnet,
                      eyes: Eyes(x: 50, y: 76, gap: 20, width: 9, height: 14),
                      patches: [Patch(path: Draw.box(10, 5, 80, 17, 0), opacity: 0.55)]),
         BotCharacter(id: "pebbles", body: Draw.join(Draw.circle(50, 65, 28), Draw.circle(29, 36, 17), Draw.circle(67, 30, 20)), eyes: Eyes(x: 50, y: 67, gap: 22, width: 10.5, height: 18)),
-        BotCharacter(id: "ring", body: Draw.circle(50, 52, 41).subtracting(Draw.circle(50, 31, 11)), eyes: Eyes(x: 50, y: 64, gap: 24, width: 10.5, height: 18)),
+        BotCharacter(id: "ring", body: Draw.ring, eyes: Eyes(x: 50, y: 64, gap: 24, width: 10.5, height: 18)),
         BotCharacter(id: "gem",
                      body: Draw.polygon([(30, 13), (70, 13), (93, 40), (50, 93), (7, 40)], radius: 7),
                      eyes: Eyes(x: 50, y: 50, gap: 22, width: 10, height: 17),
@@ -108,7 +108,69 @@ private enum Draw {
     }
 
     static func join(_ first: Path, _ others: Path...) -> Path {
-        others.reduce(first) { $0.union($1) }
+        if #available(iOS 17.0, *) {
+            return others.reduce(first) { $0.union($1) }
+        }
+        // Nonzero filling keeps overlapping components solid on iOS 16.
+        var path = first
+        for other in others { path.addPath(other) }
+        return path
+    }
+
+    static var moon: Path {
+        if #available(iOS 17.0, *) {
+            return circle(50, 50, 42).subtracting(circle(75, 31, 33))
+        }
+        // Trace the two intersecting circles as one crescent contour.
+        let distance = hypot(25.0, -19.0)
+        let direction = atan2(-19.0, 25.0)
+        let spread = acos((42 * 42 + distance * distance - 33 * 33) / (2 * 42 * distance))
+        let upper = direction - spread
+        let lower = direction + spread
+        let upperPoint = CGPoint(x: 50 + 42 * cos(upper), y: 50 + 42 * sin(upper))
+        let lowerPoint = CGPoint(x: 50 + 42 * cos(lower), y: 50 + 42 * sin(lower))
+        var path = Path()
+        path.addArc(center: CGPoint(x: 50, y: 50), radius: 42,
+                    startAngle: .radians(lower), endAngle: .radians(upper + 2 * .pi), clockwise: false)
+        path.addArc(center: CGPoint(x: 75, y: 31), radius: 33,
+                    startAngle: .radians(atan2(upperPoint.y - 31, upperPoint.x - 75)),
+                    endAngle: .radians(atan2(lowerPoint.y - 31, lowerPoint.x - 75)), clockwise: true)
+        path.closeSubpath()
+        return path
+    }
+
+    static var magnet: Path {
+        if #available(iOS 17.0, *) {
+            return join(box(14, 9, 72, 48, 7), circle(50, 54, 36))
+                .subtracting(join(box(38, 0, 24, 50, 0), circle(50, 50, 12)))
+        }
+        // A single U-shaped contour keeps the open slot transparent.
+        var path = Path()
+        path.move(to: CGPoint(x: 38, y: 9))
+        path.addLine(to: CGPoint(x: 21, y: 9))
+        path.addQuadCurve(to: CGPoint(x: 14, y: 16), control: CGPoint(x: 14, y: 9))
+        path.addLine(to: CGPoint(x: 14, y: 54))
+        path.addArc(center: CGPoint(x: 50, y: 54), radius: 36,
+                    startAngle: .degrees(180), endAngle: .degrees(0), clockwise: true)
+        path.addLine(to: CGPoint(x: 86, y: 16))
+        path.addQuadCurve(to: CGPoint(x: 79, y: 9), control: CGPoint(x: 86, y: 9))
+        path.addLine(to: CGPoint(x: 62, y: 9))
+        path.addLine(to: CGPoint(x: 62, y: 50))
+        path.addArc(center: CGPoint(x: 50, y: 50), radius: 12,
+                    startAngle: .degrees(0), endAngle: .degrees(180), clockwise: false)
+        path.addLine(to: CGPoint(x: 38, y: 9))
+        path.closeSubpath()
+        return path
+    }
+
+    static var ring: Path {
+        if #available(iOS 17.0, *) {
+            return circle(50, 52, 41).subtracting(circle(50, 31, 11))
+        }
+        // Reverse the inner contour so nonzero fills and clipping retain the hole.
+        var path = circle(50, 52, 41)
+        path.addPath(Path(UIBezierPath(cgPath: circle(50, 31, 11).cgPath).reversing().cgPath))
+        return path
     }
 
     static func turned(_ path: Path, by degrees: Double, about pivot: (Double, Double)) -> Path {

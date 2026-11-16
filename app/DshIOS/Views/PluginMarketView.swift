@@ -243,7 +243,7 @@ struct PluginMarketPage: View {
         }
         .sheet(isPresented: $managing) { MarketSourcesSheet(model: model) }
         .sheet(item: $choice) { MarketInstallConfirm(choice: $0) }
-        .navigationDestination(item: $route) { PluginDetailView(name: $0.name) }
+        .navigationDestination16(item: $route) { PluginDetailView(name: $0.name) }
         .task(id: app.revision("plugin-market/changed")) { await model.loadIndexes(app) }
         .task(id: app.revision("plugin-manager/changed")) { if model.result != nil { await model.reload(app, limit: max(model.entries.count, 50)) } }
         // Keystrokes settle for 250 ms before a read.
@@ -573,7 +573,7 @@ private struct MarketEntryDetail: View {
         .groupedList()
         .navigationTitle(marketTitle(entry))
         .navigationBarTitleDisplayMode(.inline)
-        .navigationDestination(item: $route) { PluginDetailView(name: $0.name) }
+        .navigationDestination16(item: $route) { PluginDetailView(name: $0.name) }
     }
 
     @ViewBuilder

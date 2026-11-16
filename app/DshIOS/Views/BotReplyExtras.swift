@@ -42,7 +42,7 @@ struct BotReactionMenu: View {
                     Button(emoji) { reactions.toggle(emoji, for: key) }
                 }
             }
-            .controlGroupStyle(.compactMenu)
+            .reactionControlGroup16()
         }
     }
 }

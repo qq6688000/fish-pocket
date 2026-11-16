@@ -142,10 +142,19 @@ private struct ChartView: View {
         let upper = options["yAxis"]["max"].double
         VStack(alignment: .leading, spacing: 6) {
             if let title = options["title"]["text"].string { Text(title).font(.subheadline.bold()) }
+            if #unavailable(iOS 17.0), kind.contains("Pie") || kind.contains("Ring") {
+                Text("饼图 / 圆环图 · 当前系统以柱状图显示").font(.caption2).foregroundStyle(.secondary)
+            }
             Chart(points) { point in
                 if kind.contains("Pie") || kind.contains("Ring") {
-                    SectorMark(angle: .value(point.series, point.value), innerRadius: .ratio(kind.contains("Ring") ? 0.5 : 0))
-                        .foregroundStyle(by: .value("类别", point.category))
+                    if #available(iOS 17.0, *) {
+                        SectorMark(angle: .value(point.series, point.value), innerRadius: .ratio(kind.contains("Ring") ? 0.5 : 0))
+                            .foregroundStyle(by: .value("类别", point.category))
+                    } else {
+                        BarMark(x: .value("类别", point.category), y: .value(point.series, point.value))
+                            .foregroundStyle(by: .value("类别", point.category))
+                            .position(by: .value("系列", point.series))
+                    }
                 } else if kind.contains("Line") || kind.contains("Area") {
                     LineMark(x: .value("类别", point.category), y: .value(point.series, point.value))
                         .foregroundStyle(by: .value("系列", point.series))

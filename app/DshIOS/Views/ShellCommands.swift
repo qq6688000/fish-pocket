@@ -77,10 +77,10 @@ struct ShellCommands: Commands {
     }
 }
 
-private struct CompatWindowCommandsKey: EnvironmentKey {
-    static var defaultValue: WindowCommands? { nil }
+private struct CompatWindowCommandsKey: FocusedValueKey {
+    typealias Value = WindowCommands
 }
 
-private struct CompatWorkbenchCommandsKey: EnvironmentKey {
-    static var defaultValue: WorkbenchCommands? { nil }
+private struct CompatWorkbenchCommandsKey: FocusedValueKey {
+    typealias Value = WorkbenchCommands
 }

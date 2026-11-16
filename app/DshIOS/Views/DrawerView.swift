@@ -55,6 +55,7 @@ struct DrawerView: View {
     @State private var searchOpen = false
     @State private var searchShown = false
     @State private var searchActive = false
+    @State private var searchClosing = false
     @State private var remoteHits: [String: String] = [:]
     @State private var remoteMore = false
     @State private var searching = false
@@ -159,14 +160,14 @@ struct DrawerView: View {
             }
             .background(Palette.background)
             .navigationBarTitleDisplayMode(.inline)
-            .searchable(text: $search, isPresented: $searchActive, prompt: "搜索会话")
+            .modifier(DrawerSearchField(text: $search, isActive: $searchActive))
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled()
             .searchFieldAtBottom()
             .modifier(SearchPageClose(action: closeSearch))
         }
         .tint(Palette.ink)
-        .opacity(searchShown ? 1 : 0)
+        .modifier(SearchPageFade(opacity: searchShown ? 1 : 0, completion: finishClosingSearch))
         .sheetBackground(.clear)
         .onAppear { withAnimation(.easeOut(duration: 0.2)) { searchShown = true } }
         // The field's own ✕ (取消 before iOS 26) is the way out.
@@ -175,17 +176,24 @@ struct DrawerView: View {
 
     private func openSearch() {
         guard !searchOpen else { return }
+        searchClosing = false
         searchActive = true
         withoutAnimation { searchOpen = true }
     }
 
     private func closeSearch() {
-        guard searchOpen, searchShown else { return }
+        guard searchOpen, searchShown, !searchClosing else { return }
+        searchClosing = true
         searchActive = false
-        withAnimation(.easeIn(duration: 0.15)) { searchShown = false } completion: {
-            search = ""
-            withoutAnimation { searchOpen = false }
-        }
+        withAnimation(.easeIn(duration: 0.15)) { searchShown = false }
+    }
+
+    private func finishClosingSearch() {
+        // Ignore a completion from an interrupted fade or a page already dismissed by selection.
+        guard searchOpen, searchClosing, !searchShown else { return }
+        searchClosing = false
+        search = ""
+        withoutAnimation { searchOpen = false }
     }
 
     /// Opens a session from any list here. From the search page, the page goes at once:
@@ -1188,6 +1196,117 @@ struct MachineTag: View {
         .background(Palette.control, in: Capsule())
         .accessibilityElement(children: .combine)
     }
+}
+
+/// iOS 16's searchable has no presentation binding. A native search bar gives that
+/// branch real first-responder control without relying on SwiftUI's private view hierarchy.
+private struct DrawerSearchField: ViewModifier {
+    @Binding var text: String
+    @Binding var isActive: Bool
+
+    func body(content: Content) -> some View {
+        if #available(iOS 17.0, *) {
+            content.searchable(text: $text, isPresented: $isActive, prompt: "搜索会话")
+        } else {
+            content.safeAreaInset(edge: .top, spacing: 0) {
+                DrawerLegacySearchBar(text: $text, isActive: $isActive)
+                    .frame(height: 56)
+            }
+        }
+    }
+}
+
+private struct DrawerLegacySearchBar: UIViewRepresentable {
+    @Binding var text: String
+    @Binding var isActive: Bool
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeUIView(context: Context) -> SearchBar {
+        let bar = SearchBar()
+        bar.delegate = context.coordinator
+        bar.searchBarStyle = .minimal
+        bar.placeholder = String(localized: "搜索会话")
+        bar.autocapitalizationType = .none
+        bar.autocorrectionType = .no
+        bar.setShowsCancelButton(true, animated: false)
+        return bar
+    }
+
+    func updateUIView(_ bar: SearchBar, context: Context) {
+        context.coordinator.parent = self
+        if bar.text != text { bar.text = text }
+        bar.wantsFocus = isActive
+        if isActive {
+            bar.requestFocusIfNeeded()
+        } else {
+            bar.hasRequestedFocus = false
+            bar.resignFirstResponder()
+        }
+    }
+
+    final class SearchBar: UISearchBar {
+        var wantsFocus = false
+        var hasRequestedFocus = false
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            requestFocusIfNeeded()
+        }
+
+        func requestFocusIfNeeded() {
+            guard window != nil, wantsFocus, !hasRequestedFocus else { return }
+            // The cover must be installed before UIKit can make the field first responder.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.window != nil, self.wantsFocus,
+                      !self.hasRequestedFocus else { return }
+                self.hasRequestedFocus = self.becomeFirstResponder()
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, UISearchBarDelegate {
+        var parent: DrawerLegacySearchBar
+        init(_ parent: DrawerLegacySearchBar) { self.parent = parent }
+
+        func searchBar(_ searchBar: UISearchBar, textDidChange searchText: String) {
+            parent.text = searchText
+        }
+
+        func searchBarCancelButtonClicked(_ searchBar: UISearchBar) {
+            parent.isActive = false
+        }
+
+        func searchBarSearchButtonClicked(_ searchBar: UISearchBar) {
+            searchBar.resignFirstResponder()
+        }
+    }
+}
+
+/// Observe the rendered opacity, so completion follows the animation on iOS 16 too.
+/// Dispatch outside the render pass; the owner rejects stale or interrupted completions.
+private struct SearchPageFade: AnimatableModifier {
+    var opacity: Double
+    let completion: () -> Void
+    private let target: Double
+
+    init(opacity: Double, completion: @escaping () -> Void) {
+        self.opacity = opacity
+        self.target = opacity
+        self.completion = completion
+    }
+
+    var animatableData: Double {
+        get { opacity }
+        set {
+            opacity = newValue
+            if target == 0, newValue == target {
+                DispatchQueue.main.async(execute: completion)
+            }
+        }
+    }
+
+    func body(content: Content) -> some View { content.opacity(opacity) }
 }
 
 /// The way out of the search page on iPad from iOS 26: there the system puts the field in the

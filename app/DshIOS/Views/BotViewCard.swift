@@ -188,12 +188,29 @@ struct BotViewBody: View {
         let points: [Point]
 
         var body: some View {
+            if #unavailable(iOS 17.0), kind == "donut" {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("圆环图 · 当前系统以柱状图显示").font(.caption2).foregroundStyle(.secondary)
+                    chart
+                }
+            } else {
+                chart
+            }
+        }
+
+        private var chart: some View {
             Chart(points) { point in
                 switch kind {
                 case "line": LineMark(x: .value("", point.category), y: .value("", point.value)).foregroundStyle(by: .value("", point.series))
                 case "area": AreaMark(x: .value("", point.category), y: .value("", point.value)).foregroundStyle(by: .value("", point.series))
                 case "hbar": BarMark(x: .value("", point.value), y: .value("", point.category)).foregroundStyle(by: .value("", point.series))
-                case "donut": SectorMark(angle: .value("", point.value), innerRadius: .ratio(0.6)).foregroundStyle(by: .value("", point.category))
+                case "donut":
+                    if #available(iOS 17.0, *) {
+                        SectorMark(angle: .value("", point.value), innerRadius: .ratio(0.6)).foregroundStyle(by: .value("", point.category))
+                    } else {
+                        BarMark(x: .value("类别", point.category), y: .value("数值", point.value))
+                            .foregroundStyle(by: .value("类别", point.category))
+                    }
                 default: BarMark(x: .value("", point.category), y: .value("", point.value)).foregroundStyle(by: .value("", point.series))
                 }
             }

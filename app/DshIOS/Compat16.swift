@@ -590,3 +590,23 @@ private struct CompatBoolPhase<Trigger: Equatable, Base: View, Animated: View>: 
         }
     }
 }
+
+// Optional-item navigation without the iOS 17 overload.
+extension View {
+    func navigationDestination16<Item, Destination: View>(item: Binding<Item?>,
+        @ViewBuilder destination: @escaping (Item) -> Destination) -> some View {
+        navigationDestination(isPresented: Binding(
+            get: { item.wrappedValue != nil },
+            set: { if !$0 { item.wrappedValue = nil } }
+        )) {
+            if let value = item.wrappedValue { destination(value) }
+        }
+    }
+}
+
+extension View {
+    @ViewBuilder func reactionControlGroup16() -> some View {
+        if #available(iOS 16.4, *) { controlGroupStyle(.compactMenu) }
+        else { self }
+    }
+}

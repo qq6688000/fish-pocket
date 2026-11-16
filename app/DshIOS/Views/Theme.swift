@@ -138,7 +138,7 @@ struct MonoToggleStyle: ToggleStyle {
                     MonoSwitch(isOn: configuration.$isOn)
                 }
                 .accessibilityElement(children: .combine)
-                .accessibilityAddTraits(.isToggle)
+                .modifier(CompatToggleTraits())
                 .accessibilityValue(configuration.isOn ? Text("开") : Text("关"))
                 .accessibilityAction { configuration.isOn.toggle() }
             }
@@ -178,9 +178,20 @@ struct MonoSwitch: View {
             .onTapGesture { isOn.toggle(); Haptics.select() }
             .accessibilityElement()
             .accessibilityLabel(label ?? Text(""))
-            .accessibilityAddTraits(.isToggle)
+            .modifier(CompatToggleTraits())
             .accessibilityValue(isOn ? Text("开") : Text("关"))
             .accessibilityAction { isOn.toggle() }
+    }
+}
+
+/// Keep the value and activation action on iOS 16, which has no toggle trait.
+private struct CompatToggleTraits: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 17.0, *) {
+            content.accessibilityAddTraits(.isToggle)
+        } else {
+            content.accessibilityAddTraits(.isButton)
+        }
     }
 }
 

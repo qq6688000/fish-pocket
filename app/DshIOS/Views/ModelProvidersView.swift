@@ -858,8 +858,8 @@ private struct ModelCatalogSection: View {
                         tokensHint: family == .deepseek ? defaultMaxTokens.map(formatCapacity) ?? String(localized: "使用提供商默认值") : "32K",
                         reasoningLevels: reasoningLevels,
                         disabled: disabled,
-                        update: { next in compatOnChange(models.enumerated().map { $0.offset == index ? next : $0.element }) },
-                        remove: { compatOnChange(models.enumerated().filter { $0.offset != index }.map(\.element)) }
+                        update: { next in onChange(models.enumerated().map { $0.offset == index ? next : $0.element }) },
+                        remove: { onChange(models.enumerated().filter { $0.offset != index }.map(\.element)) }
                     )
                 } label: {
                     VStack(alignment: .leading, spacing: 1) {
@@ -871,11 +871,11 @@ private struct ModelCatalogSection: View {
                     }
                 }
                 .swipeActions {
-                    Button("删除模型", role: .destructive) { compatOnChange(models.enumerated().filter { $0.offset != index }.map(\.element)) }
+                    Button("删除模型", role: .destructive) { onChange(models.enumerated().filter { $0.offset != index }.map(\.element)) }
                 }
             }
             Button {
-                compatOnChange(models + [["id": ""]])
+                onChange(models + [["id": ""]])
             } label: {
                 Label("添加模型", systemImage: "plus").foregroundStyle(Palette.ink)
             }
@@ -963,7 +963,7 @@ private struct ModelCatalogSection: View {
             if !candidate["inputModalities"].isNull { row["input"] = candidate["inputModalities"] }
             rows.append(.object(row))
         }
-        compatOnChange(rows)
+        onChange(rows)
         candidates = nil
     }
 }
