@@ -163,13 +163,17 @@ struct FileChooserSheet: View {
             onPick()
             dismiss()
         } catch {
-            failure = String(localized: "「\(name)」添加失败：\(describeFailure(error))")
+            let message = String(localized: "「\(name)」添加失败：\(describeFailure(error))")
+            failure = message
+            app.showToast(message)
         }
     }
 
-    /// The engine lists paths inside the app's own container, which the app can read directly.
+    /// The listing hands back engine paths (`/home/dsh/Documents/…`); `EnginePaths.real`
+    /// maps one onto the sandbox URL this process can open.
     private func readLocal(_ filePath: String) async throws -> Data {
-        try await Task.detached(priority: .userInitiated) { try Data(contentsOf: URL(fileURLWithPath: filePath)) }.value
+        let url = EnginePaths.real(filePath)
+        return try await Task.detached(priority: .userInitiated) { try Data(contentsOf: url) }.value
     }
 
     private func stageFromPicker(_ url: URL) async {
