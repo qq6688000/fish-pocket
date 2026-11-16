@@ -1,0 +1,55 @@
+name: Fish Pocket 1.2 iOS16 IPA
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: engine/package-lock.json
+      - name: Xcode
+        run: xcodebuild -version
+      - name: Vendor cache
+        uses: actions/cache@v5
+        with:
+          path: vendor
+          key: ios16-vendor-${{ hashFiles('scripts/fetch-nodejs-mobile.sh', 'scripts/fetch-python.sh', 'scripts/build-libgit2.sh', 'scripts/build-ffmpeg.sh') }}
+      - name: Native dependencies
+        run: |
+          bash scripts/fetch-nodejs-mobile.sh
+          bash scripts/fetch-python.sh
+          bash scripts/build-libgit2.sh
+          bash scripts/fetch-ffmpeg.sh
+          bash scripts/check-root-imports.sh
+      - name: Engine
+        run: bash scripts/build-engine.sh
+      - name: Generate project
+        run: |
+          command -v xcodegen >/dev/null || brew install xcodegen
+          cd app
+          xcodegen generate --quiet
+      - name: Build unsigned device app
+        shell: bash
+        run: |
+          set -o pipefail
+          cd app
+          xcodebuild -project DshIOS.xcodeproj -scheme DshIOS -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build/DerivedData -skipPackagePluginValidation ARCHS=arm64 ONLY_ACTIVE_ARCH=NO CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= build 2>&1 | tee ../build-ios16.log
+      - name: Package
+        run: |
+          python3 scripts/package-ios16.py
+      - name: Upload IPA and build evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: FishPocket-1.2-ios16
+          path: |
+            FishPocket-1.2-ios16.ipa
+            build-ios16.log
+          if-no-files-found: warn

@@ -1,0 +1,283 @@
+import ActivityKit
+import AppIntents
+import SwiftUI
+import WidgetKit
+
+@main
+struct DshWidgets: WidgetBundle {
+    var body: some Widget {
+        DshLiveActivity()
+        SessionsWidget()
+        NewConversationWidget()
+        if #available(iOS 18.0, *) {
+            NewConversationControl()
+        }
+        // AlarmKit presents through ActivityKit, so an agent-set alarm has nowhere
+        // to show up unless a widget here claims its attributes.
+        if #available(iOS 26.0, *) {
+            AlarmActivity()
+        }
+    }
+}
+
+/// Agent status on the lock screen and in the Dynamic Island: a status dot and
+/// the elapsed time when compact; the session, the step it waits on and the
+/// approval buttons when expanded.
+struct DshLiveActivity: Widget {
+    var body: some WidgetConfiguration {
+        // From iOS 18 the activity also shows on a paired Apple Watch (in the Smart Stack):
+        // there it gets a card of its own rather than the compact Dynamic Island.
+        if #available(iOS 18.0, *) {
+            return Self.configuration { FamilyBanner(state: $0) }
+                .supplementalActivityFamilies([.small])
+        } else {
+            return Self.configuration { LockScreenView(state: $0) }
+        }
+    }
+
+    /// The one Live Activity, with `banner` as what the lock screen (and the watch) shows.
+    private static func configuration<Banner: View>(
+        @ViewBuilder banner: @escaping (DshActivityAttributes.ContentState) -> Banner
+    ) -> some WidgetConfiguration {
+        ActivityConfiguration(for: DshActivityAttributes.self) { context in
+            banner(context.state)
+                .widgetURL(context.state.url)
+        } dynamicIsland: { context in
+            let state = context.state
+            return DynamicIsland {
+                DynamicIslandExpandedRegion(.leading) {
+                    HStack(spacing: 6) {
+                        Dot(phase: state.phase)
+                        Mark()
+                    }
+                    .padding(.leading, 4)
+                }
+                DynamicIslandExpandedRegion(.trailing) {
+                    Elapsed(state: state)
+                        .font(.subheadline.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .padding(.trailing, 4)
+                }
+                DynamicIslandExpandedRegion(.bottom) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 6) {
+                            Text(state.title).font(.headline).lineLimit(1)
+                            Spacer(minLength: 0)
+                            Text(Label.phase(state)).font(.caption.weight(.semibold)).foregroundStyle(Tint.of(state.phase))
+                        }
+                        if let detail = state.detail {
+                            Text(detail).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
+                        }
+                        if let approval = state.approval { ApprovalButtons(approval: approval).padding(.top, 4) }
+                    }
+                    .padding(.horizontal, 4)
+                }
+            } compactLeading: {
+                CompactLeading(phase: state.phase)
+            } compactTrailing: {
+                Group {
+                    if state.phase == .approval || state.phase == .question {
+                        Text(state.phase == .approval ? "待允许" : "待回答")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(Tint.of(state.phase))
+                    } else {
+                        Elapsed(state: state)
+                            .font(.caption2.monospacedDigit())
+                            .frame(maxWidth: 44)
+                    }
+                }
+                // An hour-long run, or the narrow island, shrinks the text rather than cutting it.
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            } minimal: {
+                Dot(phase: state.phase)
+            }
+            .widgetURL(state.url)
+            .keylineTint(Tint.of(state.phase))
+        }
+    }
+}
+
+/// The lock screen banner, or the card on the watch.
+@available(iOS 18.0, *)
+private struct FamilyBanner: View {
+    let state: DshActivityAttributes.ContentState
+    @Environment(\.activityFamily) private var family
+
+    var body: some View {
+        switch family {
+        case .small: WristView(state: state)
+        default: LockScreenView(state: state)
+        }
+    }
+}
+
+/// The card on the watch: whose turn it is, how long it has run, which session and
+/// what it waits on. Answering happens in the watch app, which a tap opens.
+private struct WristView: View {
+    let state: DshActivityAttributes.ContentState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 5) {
+                Dot(phase: state.phase)
+                Text(Label.phase(state))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Tint.of(state.phase))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Elapsed(state: state).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            }
+            Text(state.title).font(.headline).lineLimit(1)
+            if let detail = state.detail {
+                Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+        }
+        // The Smart Stack gives the card no margins of its own.
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+    }
+}
+
+private struct LockScreenView: View {
+    let state: DshActivityAttributes.ContentState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Dot(phase: state.phase)
+                Text(Label.phase(state)).font(.caption.weight(.semibold)).foregroundStyle(Tint.of(state.phase))
+                Spacer(minLength: 0)
+                Elapsed(state: state).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            }
+            Text(state.title).font(.headline).lineLimit(1)
+            if let detail = state.detail {
+                Text(detail).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
+            }
+            if let approval = state.approval { ApprovalButtons(approval: approval).padding(.top, 4) }
+        }
+        .padding(16)
+    }
+}
+
+private struct ApprovalButtons: View {
+    let approval: DshActivityAttributes.ContentState.Approval
+
+    var body: some View {
+        HStack(spacing: 8) {
+          if #available(iOS 17.0, *) {
+            Button(intent: AnswerApprovalIntent(eventId: approval.eventId, agentId: approval.agentId, allow: false)) {
+                Text("拒绝").frame(maxWidth: .infinity)
+            }
+            .tint(.gray)
+            Button(intent: AnswerApprovalIntent(eventId: approval.eventId, agentId: approval.agentId, allow: true)) {
+                Text("允许").fontWeight(.semibold).frame(maxWidth: .infinity)
+            }
+            .tint(Tint.waiting)
+          } else {
+            Link("打开会话处理审批", destination: DshLink.session(approval.agentId).url)
+          }
+        }
+        .buttonStyle(.borderedProminent)
+        .buttonBorderShape(.capsule)
+        .font(.subheadline)
+    }
+}
+
+/// Counts up while working; the total once done.
+private struct Elapsed: View {
+    let state: DshActivityAttributes.ContentState
+
+    var body: some View {
+        if let end = state.endedAt {
+            Text(Duration.seconds(max(0, end.timeIntervalSince(state.startedAt))).formatted(.time(pattern: .minuteSecond)))
+        } else {
+            Text(timerInterval: state.startedAt...Date.distantFuture, countsDown: false)
+                .multilineTextAlignment(.trailing)
+        }
+    }
+}
+
+/// The dot and the mark side by side. iPhone Duo's island stands upright and is too narrow for
+/// both (the dot was cut in half): there the mark alone carries the status colour.
+private struct CompactLeading: View {
+    let phase: DshActivityAttributes.ContentState.Phase
+
+    var body: some View {
+        // The upright island came with the iOS 27 SDK (SwiftUI 8): Xcode 26 still builds the widget.
+        #if canImport(SwiftUI, _version: 8.0)
+        if #available(iOS 27.0, *) {
+            Narrowable(phase: phase)
+        } else {
+            Self.full(phase)
+        }
+        #else
+        Self.full(phase)
+        #endif
+    }
+
+    static func full(_ phase: DshActivityAttributes.ContentState.Phase) -> some View {
+        HStack(spacing: 5) {
+            Dot(phase: phase)
+            Mark()
+        }
+        .padding(.leading, 2)
+    }
+
+    #if canImport(SwiftUI, _version: 8.0)
+    @available(iOS 27.0, *)
+    private struct Narrowable: View {
+        let phase: DshActivityAttributes.ContentState.Phase
+        @Environment(\.isDynamicIslandLimitedInWidth) private var limited
+
+        var body: some View {
+            if limited {
+                Mark().foregroundStyle(Tint.of(phase))
+            } else {
+                CompactLeading.full(phase)
+            }
+        }
+    }
+    #endif
+}
+
+/// The brand mark: the Dynamic Island has no room for the full name.
+private struct Mark: View {
+    var body: some View {
+        Image(systemName: "fish.fill").font(.system(size: 14, weight: .bold)).accessibilityLabel("Fish Pocket")
+    }
+}
+
+private struct Dot: View {
+    let phase: DshActivityAttributes.ContentState.Phase
+
+    var body: some View {
+        Circle().fill(Tint.of(phase)).frame(width: 8, height: 8)
+    }
+}
+
+/// The app's status colours (StatusRunning / StatusWaiting, dark values: readable on the island and the lock screen).
+private enum Tint {
+    static let running = Color(red: 0x3D / 255, green: 0xD6 / 255, blue: 0x8C / 255)
+    static let waiting = Color(red: 0xF5 / 255, green: 0xA5 / 255, blue: 0x24 / 255)
+
+    static func of(_ phase: DshActivityAttributes.ContentState.Phase) -> Color {
+        switch phase {
+        case .running: running
+        case .approval, .question: waiting
+        case .done: .secondary
+        }
+    }
+}
+
+private enum Label {
+    static func phase(_ state: DshActivityAttributes.ContentState) -> String {
+        let base: String = switch state.phase {
+        case .running: String(localized: "进行中")
+        case .approval: String(localized: "等你允许")
+        case .question: String(localized: "等你回答")
+        case .done: String(localized: "已完成")
+        }
+        return state.others > 0 ? base + String(localized: " · 另有 \(state.others) 个") : base
+    }
+}

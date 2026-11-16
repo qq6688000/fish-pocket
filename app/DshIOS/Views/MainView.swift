@@ -1,0 +1,805 @@
+import StoreKit
+import SwiftUI
+
+/// The root: a conversation, always. On iPhone the session list is a drawer
+/// that slides in from the left (edge swipe or the top-left button); in
+/// regular width it is the split view's sidebar. With nothing selected — at
+/// launch, after archiving — a blank session in the current workspace opens.
+struct MainView: View {
+    enum Sheet: String, Identifiable { case settings, plugins, store, schedules, signIn, cordis, share, capabilities, connectors, remote; var id: String { rawValue } }
+
+    @EnvironmentObject private var app: AppModel
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.openURL) private var openURL
+    @Environment(\.requestReview) private var requestReview
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
+    @AppStorage("dsh.currentWorkspace") private var workspaceId = ""
+    @State private var selection: String?
+    @State private var sheet: Sheet?
+    /// In regular width the plugin store takes the conversation's place beside the sidebar.
+    @State private var storeOpen = false
+    @State private var webOpen = false
+    /// The Bot pages take the conversation's place (the drawer's Bot card opens them).
+    @State private var botOpen = false
+    @State private var botPath: [BotRoute] = []
+    /// The sidebar, in regular width.
+    @State private var sidebar = NavigationSplitViewVisibility.all
+    @State private var windowWidth: CGFloat = 0
+    @State private var searchRequest = 0
+    @State private var drawerOpen = false
+    @State private var drag: CGFloat = 0
+    /// The way a drag on the shell set off, fixed by its first move; nil between drags.
+    /// A plain reference filled by the drawer's rows.
+    @State private var rowFrames = DrawerRowFrames()
+    @State private var creating = false
+    @State private var onboarding: Onboarding?
+    /// 「添加 API Key」 was chosen in the sign-in sheet: its key editor follows once that sheet is gone.
+    @State private var keyEditorRef: String?
+    /// The ask for a Star or a share (`SupportPrompt`'s `.support`).
+    @State private var supportDialog = false
+    /// 「新功能」 after an update (`WhatsNew`).
+    @State private var whatsNew: WhatsNew.Release?
+    /// It was shown: no update toast on top of it this time.
+    @State private var newsShown = false
+    /// 「在电脑上新建会话」, once whatever sheet asked for it has gone.
+    @State private var remoteTarget: RemoteSessionTarget?
+    /// The launch has gone back to the page the app was last on (`place`); from then on the page
+    /// in front is kept for the next launch. A window opened on a session stays on it.
+    @State private var placeRestored: Bool
+    /// The launch went back to a Bot page: the blank conversation made under it does not take its place.
+    @State private var launchedUnderBot = false
+
+    /// A `dsh://` link this window received (`RootView`), until it is followed.
+    @Binding private var link: LinkRequest?
+
+    /// `session`: the one this window opened on, when it opened on one.
+    init(session: String? = nil, link: Binding<LinkRequest?> = .constant(nil)) {
+        _selection = State(initialValue: session)
+        _placeRestored = State(initialValue: session != nil)
+        _link = link
+    }
+
+    private static let placeKey = "dsh.lastPlace"
+
+    /// The page in front, as it is kept for the next launch: a conversation, the Bot list, a
+    /// Bot's chat or a group.
+    private var place: String? {
+        guard botOpen else { return selection.map { "session:\($0)" } }
+        switch botPath.last {
+        case .bot(let id)?: return "bot:\(id)"
+        case .room(let id)?: return "room:\(id)"
+        case nil: return "bots"
+        }
+    }
+
+    /// Back to the page the app was last on, when it is still there; a link or a notification
+    /// that opened the app has already picked its own.
+    private func restorePlace() {
+        guard selection == nil, let kept = UserDefaults.standard.string(forKey: Self.placeKey) else { return }
+        let parts = kept.split(separator: ":", maxSplits: 1).map(String.init)
+        let id = parts.count > 1 ? parts[1] : ""
+        switch parts[0] {
+        case "session":
+            // A session on a computer is taken on trust while signed in: its page says so if it has gone.
+            if RemoteStore.sessionId(of: id) != nil ? app.remote.signedIn : app.workspace(of: id) != nil && !app.isArchived(id) { selection = id }
+        case "bot": openBots([.bot(id)])
+        case "room": openBots([.room(id)])
+        case "bots": openBots([])
+        default: break
+        }
+    }
+
+    private func openBots(_ path: [BotRoute]) {
+        launchedUnderBot = true
+        botOpen = true
+        botPath = path
+    }
+
+    /// The credential sheets (`settings.onboarding`'s steps). Unlike the web they never open by
+    /// themselves at launch: the interface comes first, and a message sent with nothing to answer
+    /// it asks for them (`SessionModel`), as do the sign-in buttons.
+    enum Onboarding: Identifiable {
+        case signIn(ref: String, autoStart: Bool = false)
+        case key(ref: String)
+        var id: String {
+            switch self {
+            case .signIn: "sign-in"
+            case .key: "key"
+            }
+        }
+    }
+
+    private var workspace: Workspace? {
+        app.workspaces.first { $0.id == workspaceId } ?? app.workspaces.first
+    }
+
+    /// A button of the support dialog: the ask is answered for good.
+    private func settleSupport(then action: () -> Void) {
+        Haptics.tap()
+        SupportPrompt.settle()
+        supportDialog = false
+        action()
+    }
+
+    /// Announcements are made once, so never under a sheet.
+    private var canAnnounce: Bool {
+        scenePhase == .active && onboarding == nil && sheet == nil && whatsNew == nil
+    }
+
+    /// The width's own layout, with the way into the plugin store.
+    private var layout: some View {
+        Group {
+            if sizeClass == .regular { split } else { drawerLayout }
+        }
+        // The drawer and the new conversation page, which have no way to the store themselves.
+        .compatOnChange(of: app.pluginStoreRequest) { _, token in
+            guard token != nil, scenePhase != .background else { return }
+            app.pluginStoreRequest = nil
+            openPlugins()
+        }
+        .compatOnChange(of: app.webRequest) { _, token in
+            guard token != nil, scenePhase != .background else { return }
+            app.webRequest = nil
+            webOpen = true
+        }
+        .compatOnChange(of: app.botTeam.openRequest?.token) { _, token in
+            guard token != nil, let request = app.botTeam.openRequest else { return }
+            app.botTeam.openRequest = nil
+            sheet = nil
+            storeOpen = false
+            botOpen = true
+            botPath = request.route.map { route in request.push && botPath.last != route ? botPath + [route] : [route] } ?? []
+            setDrawer(false)
+        }
+        // The sidebar's own row; the page is also still under Settings.
+        .compatOnChange(of: app.nativeCapabilitiesRequest) { _, token in
+            guard token != nil, scenePhase != .background else { return }
+            app.nativeCapabilitiesRequest = nil
+            sheet = .capabilities
+        }
+        .compatOnChange(of: app.remoteRequest) { _, token in
+            guard token != nil, scenePhase != .background else { return }
+            app.remoteRequest = nil
+            setDrawer(false)
+            sheet = .remote
+        }
+        // Asked for from the sidebar, a conversation or a page inside a sheet: that sheet goes first.
+        .compatOnChange(of: app.remoteSessionRequest) { _, request in
+            guard let request, scenePhase != .background else { return }
+            app.remoteSessionRequest = nil
+            setDrawer(false)
+            let wait = sheet != nil
+            sheet = nil
+            Task {
+                if wait { try? await Task.sleep(for: .milliseconds(450)) }
+                remoteTarget = request
+            }
+        }
+        .sheet(item: $remoteTarget) { RemoteNewSessionSheet(target: $0).sheetNotices() }
+        // Signed out of remote control (or the server ended it): its conversation has nothing to show.
+        .compatOnChange(of: app.remote.signedIn) { _, signedIn in
+            if !signedIn, RemoteStore.sessionId(of: selection) != nil { selection = nil }
+        }
+        // Its computer was taken off the account: the same.
+        .compatOnChange(of: app.remote.departed) { _, gone in
+            if let id = RemoteStore.sessionId(of: selection), gone.contains(id) { selection = nil }
+        }
+        .compatOnChange(of: app.connectorsRequest) { _, token in
+            guard token != nil, scenePhase != .background else { return }
+            app.connectorsRequest = nil
+            sheet = .connectors
+        }
+        .fullScreenCover(isPresented: $webOpen) { WebFallbackView() }
+        // The Live Activity and the widgets; a cold launch keeps the link until this view is up.
+        .compatOnChange(of: link?.token, initial: true) {
+            guard let request = link else { return }
+            link = nil
+            Task { await follow(request.link) }
+        }
+        .compatOnChange(of: workspaceId) { WidgetSnapshotWriter.shared.refresh() }
+        // A window narrowed past the sidebar has no place beside it for the store.
+        .compatOnChange(of: sizeClass) { _, size in
+            if size != .regular, storeOpen {
+                storeOpen = false
+                sheet = .store
+            }
+        }
+    }
+
+    /// The layout with what the window follows: its launch, the page it is on, and the requests
+    /// the model raises. Apart from `body`, as `layout` is: one chain of all of it is more than
+    /// the compiler type-checks in the time it allows itself (Xcode 26 gives up on it).
+    private var shell: some View {
+        layout
+        .tint(Palette.ink)
+        .measureGeometry(for: CGFloat.self) { $0.size.width } action: { windowWidth = $0 }
+        .focusedSceneValue(\.windowCommands, windowCommands)
+        .task(id: app.workspaces.map(\.id)) { launched() }
+        .compatOnChange(of: place) { _, place in
+            if placeRestored, let place { UserDefaults.standard.set(place, forKey: Self.placeKey) }
+        }
+        // Which store this copy came from: only an App Store install is asked for a rating.
+        .task { await AppDistribution.refresh() }
+        .task(id: canAnnounce) {
+            guard canAnnounce else { return }
+            if let release = WhatsNew.take() {
+                newsShown = true
+                whatsNew = release
+                return
+            }
+            await UpdateChecker.shared.checkIfDue()
+            guard !newsShown, let update = UpdateChecker.shared.takeAnnouncement() else { return }
+            app.showToast(String(localized: "发现新版本 \(update.version)"), action: String(localized: "更新")) { openURL(update.url) }
+        }
+        // After a pause, and only into a quiet app: otherwise the next finished turn asks instead.
+        .task(id: app.supportMoment) {
+            guard app.supportMoment > 0 else { return }
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled, canAnnounce, app.toast == nil, app.currentSession == selection,
+                  !app.sessions.values.contains(where: \.running), let ask = SupportPrompt.take() else { return }
+            switch ask {
+            // The system decides whether its sheet shows, and never says.
+            case .review: requestReview()
+            case .support: supportDialog = true
+            }
+        }
+        // Windows take turns: what is read is the one in front.
+        .compatOnChange(of: scenePhase) { _, phase in if phase == .active { app.currentSession = selection } }
+        .compatOnChange(of: selection) { _, id in
+            app.currentSession = id
+            if launchedUnderBot { launchedUnderBot = false } else { botOpen = false }
+            if let id {
+                if let owner = app.workspace(of: id) { workspaceId = owner.id }
+            } else {
+                newConversation(in: workspace)
+            }
+        }
+        // An archived current session leaves the main view (here, the drawer, a follow push).
+        .compatOnChange(of: app.archived) { _, archived in
+            if let selection, archived.contains(selection) { self.selection = nil }
+        }
+        // `app.open(session:)`: toasts, the subagent catalog, schedules…
+        .compatOnChange(of: app.openRequest?.token) { _, token in
+            guard token != nil, scenePhase != .background, let id = app.openRequest?.id else { return }
+            app.openRequest = nil
+            // Asked for over a sheet (a toast there): the sheet goes, or the session opens unseen behind it.
+            sheet = nil
+            botOpen = false
+            selection = id
+            setDrawer(false)
+        }
+        .compatOnChange(of: app.newSessionRequest?.token) { _, token in
+            guard token != nil, scenePhase != .background, let request = app.newSessionRequest else { return }
+            app.newSessionRequest = nil
+            sheet = nil
+            storeOpen = false
+            let target = request.workspaceId.flatMap { id in app.workspaces.first { $0.id == id } } ?? workspace
+            if let target { workspaceId = target.id }
+            newConversation(in: target, agentPreset: request.agentPreset, draft: request.draft, prompt: request.prompt)
+            setDrawer(false)
+        }
+        .compatOnChange(of: app.credentialRequest?.token) { _, token in
+            guard token != nil, scenePhase != .background, let step = app.credentialRequest?.step else { return }
+            app.credentialRequest = nil
+            Task { await openCredentials(step) }
+        }
+        #if DEBUG
+        .task { openForChecks() }
+        #endif
+    }
+
+    /// The workspaces are known, and with them which sessions there are: back to the page the
+    /// app was last on, or a blank conversation.
+    private func launched() {
+        guard !app.workspaces.isEmpty else { return }
+        if !placeRestored {
+            placeRestored = true
+            restorePlace()
+        }
+        if selection == nil { newConversation(in: workspace) }
+    }
+
+    #if DEBUG
+    /// Screenshots and UI checks: `simctl launch … -dshOpen drawer|workbench|approval|timeline|settings|plugins|store|schedules|signin|support|share|connectors|whatsnew|capabilities|remote`.
+    private func openForChecks() {
+        switch UserDefaults.standard.string(forKey: "dshOpen") {
+        case "drawer": drawerOpen = true
+        case "settings": sheet = .settings
+        case "plugins": sheet = .plugins
+        case "store": openPlugins()
+        case "schedules": sheet = .schedules
+        case "signin": sheet = .signIn
+        case "support": supportDialog = true
+        case "share": sheet = .share
+        case "connectors": sheet = .connectors
+        case "whatsnew": whatsNew = WhatsNew.current
+        case "capabilities": sheet = .capabilities
+        case "remote": sheet = .remote
+        default: break
+        }
+    }
+    #endif
+
+    /// What a sheet of the shell shows.
+    @ViewBuilder
+    private func page(of sheet: Sheet) -> some View {
+        switch sheet {
+        case .settings: SettingsView()
+        // Pages 设置 also holds look the same opened from here: the system's lists.
+        case .plugins: SheetStack { PluginsView() }.environment(\.systemLists, true)
+        case .store: SheetStack { PluginStoreView() }
+        case .schedules: SheetStack { SchedulesView(openSession: open(session:)) }.environment(\.systemLists, true)
+        case .signIn: SignInSheet()
+        case .cordis: CordisPanelView(currentSession: selection)
+        case .share: SheetStack { ShareAppPage() }
+        case .capabilities: SheetStack { NativeCapabilitiesView() }.environment(\.systemLists, true)
+        // The services ordinary conversations and Bots both reach; the Bot team's settings hold the same page.
+        case .connectors: SheetStack { BotConnectorsPage() }.settingsStyle()
+        case .remote: SheetStack { RemoteControlPage() }.environment(\.systemLists, true)
+        }
+    }
+
+    var body: some View {
+        shell
+        .sheet(item: $sheet) { page(of: $0).sheetNotices() }
+        .sheet(item: $onboarding, onDismiss: onboardingDismissed) { step in
+            switch step {
+            case .signIn(let ref, let autoStart):
+                SignInSheet(autoStart: autoStart, addAPIKey: { keyEditorRef = ref })
+            case .key(let ref):
+                OnboardingKeySheet(ref: ref) { onboarding = nil }
+            }
+        }
+        .sheet(item: $whatsNew) { WhatsNewSheet(release: $0) }
+        .modifier(ShellDialogs())
+        .overlay { ShellNotices() }
+        .overlay {
+            if supportDialog {
+                SupportDialog(
+                    star: { settleSupport { openURL(AppLinks.repository) } },
+                    share: { settleSupport { sheet = .share } },
+                    later: { supportDialog = false }
+                )
+                .transition(.opacity.combined(with: .scale(scale: 0.94)))
+            }
+        }
+        .animation(.smoothSpring, value: supportDialog)
+        // A live turn ran out of account balance: offer Platform's top-up page, then re-read balances.
+        .alert("当前无可用余额", isPresented: Binding(get: { app.account.quotaPrompt }, set: { app.account.quotaPrompt = $0 })) {
+            Button("取消", role: .cancel) {}
+            Button("去充值") {
+                guard let url = app.account.topUpURL else { return }
+                InAppSafari.open(url) { Task { await app.account.refreshDetails() } }
+            }
+        } message: {
+            Text("充值后才能开始新会话，也可稍后在「设置 → 账号与余额」充值。")
+        }
+        .compatOnChange(of: app.lastError) { _, error in if error != nil { Haptics.error() } }
+        .alert("出错了", isPresented: Binding(get: { app.lastError != nil }, set: { if !$0 { app.lastError = nil } })) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(app.lastError ?? "")
+        }
+        .environment(\.openSession) { open(session: $0) }
+    }
+
+    // MARK: Credentials
+
+    /// Without a reference (the official route is off) the key lives in settings, and signing in is all that is left.
+    private func openCredentials(_ step: AppModel.CredentialStep) async {
+        sheet = nil
+        if case .settings = step { sheet = .settings; return }
+        guard let ref = await app.officialKeyRef() else {
+            if case .officialKey = step { sheet = .settings } else { sheet = .signIn }
+            return
+        }
+        switch step {
+        case .start, .signIn:
+            if case .signIn = step { onboarding = .signIn(ref: ref, autoStart: true) } else { onboarding = .signIn(ref: ref) }
+        case .officialKey:
+            onboarding = .key(ref: ref)
+        case .settings:
+            break
+        }
+    }
+
+    /// 「添加 API Key」 in the sign-in sheet hands over to the key editor once that sheet is gone.
+    private func onboardingDismissed() {
+        guard let ref = keyEditorRef else { return }
+        keyEditorRef = nil
+        onboarding = .key(ref: ref)
+    }
+
+    // MARK: Layouts
+
+    private var split: some View {
+        NavigationSplitView(columnVisibility: $sidebar) {
+            // A width that follows the fold hangs the split view, on the one layout pass where
+            // the window has turned and the width has not. These fit every pose.
+            drawer.navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 360)
+                .toolbar(.hidden, for: .navigationBar)
+                .modifier(SidebarToggle(system: systemSidebarButton))
+        } detail: {
+            Group {
+                if storeOpen {
+                    NavigationStack { PluginStoreView(openSidebar: hideSidebar) }
+                } else if botOpen {
+                    botStack(openDrawer: hideSidebar)
+                } else {
+                    NavigationStack { conversation(openDrawer: hideSidebar) }
+                }
+            }
+            .modifier(PastTheFold())
+        }
+        // Side by side wherever both fit. Where they do not, the system keeps the sidebar
+        // away and its button slides it over the conversation.
+        .navigationSplitViewStyle(.balanced)
+    }
+
+    /// Whether the system's sidebar button stays. From iOS 27.1 it has to: removed, a split
+    /// view too narrow for both columns (iPhone Duo open and held upright) has no way to put
+    /// the sidebar away, and its layout never settles: the app hangs there and on the next
+    /// rotation. Before that there is no such device, and the system's button cannot be
+    /// counted on: with the sidebar away, iPadOS 26 shows none in the conversation's bar.
+    private var systemSidebarButton: Bool {
+        if #available(iOS 27.1, *) { true } else { false }
+    }
+
+    /// Our button puts a shown sidebar away. Where the system's button stays, a hidden one
+    /// comes back with it, in the same place in the bar: one of the two at a time. Elsewhere
+    /// ours does both.
+    private var hideSidebar: (() -> Void)? {
+        systemSidebarButton && sidebar == .detailOnly ? nil : toggleSidebar
+    }
+
+    private var windowCommands: WindowCommands {
+        WindowCommands(
+            newConversation: {
+                sheet = nil
+                storeOpen = false
+                newConversation(in: workspace)
+                setDrawer(false)
+            },
+            newWindow: supportsMultipleWindows ? { openWindow(id: DshIOSApp.window) } : nil,
+            search: {
+                sheet = nil
+                if sizeClass == .regular { withAnimation { sidebar = .all } } else { setDrawer(true) }
+                searchRequest += 1
+            },
+            toggleSidebar: toggleSidebar,
+            openSettings: { sheet = .settings }
+        )
+    }
+
+    private func toggleSidebar() {
+        if sizeClass == .regular {
+            withAnimation { sidebar = sidebar == .detailOnly ? .all : .detailOnly }
+        } else {
+            setDrawer(!drawerOpen)
+        }
+    }
+
+    /// The workbench takes about 420 pt: under this much, the conversation would be left too little.
+    private func makeRoomForWorkbench() {
+        if windowWidth < 1100 { withAnimation { sidebar = .detailOnly } }
+    }
+
+    private var drawerLayout: some View {
+        GeometryReader { geometry in
+            let width = min(326, geometry.size.width - 64)
+            // Closed, the drawer has to clear the leading safe area too: in landscape that strip
+            // (the camera's side) is on screen, and the drawer's edge would show in it.
+            let travel = width + geometry.safeAreaInsets.leading
+            let progress = min(1, max(0, (drawerOpen ? 1 : 0) + drag / width))
+            ZStack(alignment: .leading) {
+                Group {
+                    if botOpen {
+                        botStack(openDrawer: { setDrawer(true) })
+                    } else {
+                        NavigationStack { conversation(openDrawer: { setDrawer(true) }) }
+                    }
+                }
+                .accessibilityHidden(drawerOpen)
+                Palette.scrim
+                    .opacity(progress)
+                    .ignoresSafeArea()
+                    .allowsHitTesting(progress > 0)
+                    .onTapGesture { setDrawer(false) }
+                    .accessibilityLabel("关闭侧边栏")
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityHidden(!drawerOpen)
+                drawer
+                    .frame(width: width)
+                    .offset(x: (progress - 1) * travel)
+                    .accessibilityHidden(!drawerOpen)
+            }
+            .background {
+                DrawerEdgePan(enabled: !drawerOpen) { translation in
+                    if drag == 0 { dismissKeyboard() }
+                    drag = max(0, translation)
+                } ended: { predicted in
+                    settleDrawer(predicted: predicted, width: width)
+                }
+            }
+            // A leftward swipe closes, from the dimmed side or anywhere in the drawer but a session
+            // row (there it reveals the row's actions). It follows the finger and settles by distance
+            // or speed. A recogniser that only begins sideways, not a drag gesture on this view: that
+            // one ran through every scroll of the session list, and redrew this view as each began and ended.
+            .background {
+                DrawerClosePan(enabled: drawerOpen) { start in
+                    start.x > width || !rowFrames.hasRow(atY: start.y)
+                } changed: { translation in
+                    drag = min(0, translation)
+                } ended: { predicted in
+                    if predicted == 0, drag != 0 {
+                        withAnimation(.smoothSpring(duration: 0.25)) { drag = 0 }
+                    } else {
+                        settleDrawer(predicted: predicted, width: width)
+                    }
+                }
+            }
+        }
+    }
+
+    private func settleDrawer(predicted: CGFloat, width: CGFloat) {
+        guard drag != 0 else { return }
+        let open = drawerOpen ? predicted > -width / 2 : predicted > width / 2
+        if open != drawerOpen { Haptics.select() }
+        withAnimation(.smoothSpring(duration: 0.25)) {
+            drawerOpen = open
+            drag = 0
+        }
+    }
+
+    /// Show `id` from wherever it was asked for: over a sheet it closes first.
+    private func open(session id: String) {
+        sheet = nil
+        botOpen = false
+        selection = id
+        setDrawer(false)
+    }
+
+    /// 插件, from the sidebar or the new conversation page.
+    private func openPlugins() {
+        setDrawer(false)
+        if sizeClass == .regular { storeOpen = true } else { sheet = .store }
+    }
+
+    private func setDrawer(_ open: Bool) {
+        if open { dismissKeyboard() }
+        withAnimation(.smoothSpring(duration: 0.25)) { drawerOpen = open }
+    }
+
+    private var drawer: some View {
+        DrawerView(
+            selection: selection,
+            workspace: workspace,
+            rowFrames: rowFrames,
+            pluginsSelected: storeOpen,
+            select: { id in storeOpen = false; botOpen = false; selection = id; setDrawer(false) },
+            newConversation: { workspace in storeOpen = false; botOpen = false; workspaceId = workspace.id; newConversation(in: workspace); setDrawer(false) },
+            openSettings: { sheet = .settings },
+            openSchedules: { sheet = .schedules },
+            openCordis: { sheet = .cordis },
+            openSignIn: { sheet = .signIn },
+            searchRequest: searchRequest,
+            openInWindow: supportsMultipleWindows ? { openWindow(id: DshIOSApp.window, value: SessionWindow(session: $0)) } : nil
+        )
+    }
+
+    /// The Bot list, with a Bot's chat or a group pushed on it.
+    private func botStack(openDrawer: (() -> Void)?) -> some View {
+        NavigationStack(path: $botPath) {
+            BotHomeView(openDrawer: openDrawer)
+                .navigationDestination(for: BotRoute.self) { route in
+                    switch route {
+                    case .bot(let id): BotChatView(botId: id)
+                    case .room(let id): BotRoomView(roomId: id)
+                    }
+                }
+        }
+    }
+
+    @ViewBuilder
+    private func conversation(openDrawer: (() -> Void)?) -> some View {
+        if let selection, let remote = RemoteStore.sessionId(of: selection) {
+            RemoteConversationView(sessionId: remote, selection: $selection, openDrawer: openDrawer)
+                .id(selection)
+        } else if let selection {
+            ConversationView(sessionId: selection, selection: $selection, openDrawer: openDrawer, switchWorkspace: { workspace in
+                workspaceId = workspace.id
+                newConversation(in: workspace)
+            }, makeRoomForWorkbench: makeRoomForWorkbench)
+            .id(selection)
+        } else {
+            ProgressView()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Palette.background)
+                .toolbar { if let openDrawer { ToolbarItem(placement: .navigationBarLeading) { DrawerButton(action: openDrawer) } } }
+        }
+    }
+
+    /// `dsh://session/<id>` opens the session; `dsh://new` a new conversation with the keyboard up,
+    /// once the workspaces are known and the launch's own blank conversation is in place.
+    private func follow(_ link: DshLink) async {
+        sheet = nil
+        storeOpen = false
+        setDrawer(false)
+        switch link {
+        case .session(let id):
+            // A computer's session from the lock screen or a widget, after signing out: nothing to open.
+            if RemoteStore.sessionId(of: id) != nil, !app.remote.signedIn { return }
+            selection = id
+        case .new(let workspaceId, let preset, let draft):
+            let deadline = ContinuousClock.now + .seconds(10)
+            while app.workspaces.isEmpty || creating, ContinuousClock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            let target = workspaceId.flatMap { id in app.workspaces.first { $0.id == id } } ?? workspace
+            if let target { self.workspaceId = target.id }
+            newConversation(in: target, agentPreset: preset, draft: draft, focus: true)
+        }
+    }
+
+    /// Open a blank conversation in `workspace` (the engine reuses a blank one there).
+    private func newConversation(in workspace: Workspace?, agentPreset: String? = nil, draft: String? = nil, prompt: String? = nil, focus: Bool = false) {
+        guard let workspace, !creating else { return }
+        creating = true
+        Task {
+            defer { creating = false }
+            do {
+                let id = try await app.createSession(in: workspace, agentPreset: agentPreset)
+                if let draft { app.pendingDrafts[id] = draft }
+                if let prompt { app.pendingPrompts[id] = prompt }
+                if focus { app.pendingFocus.insert(id) }
+                selection = id
+            }
+            catch { app.showToast(String(localized: "新建会话失败：\(error.localizedDescription)"), tone: .warning, duration: 6) }
+        }
+    }
+}
+
+/// On the sidebar column: the system's sidebar button, kept or removed (`systemSidebarButton`).
+private struct SidebarToggle: ViewModifier {
+    let system: Bool
+
+    func body(content: Content) -> some View {
+        if system { content } else { content.hideSidebarToggle16() }
+    }
+}
+
+/// iPhone Duo held partly open like a book, the sidebar on the near page: the column beside
+/// it starts on the far page, so nothing in it is read across the fold. A column the fold
+/// cuts down the middle (the sidebar is away) stays whole: half a display would be left empty.
+private struct PastTheFold: ViewModifier {
+    @State private var inset: CGFloat = 0
+
+    func body(content: Content) -> some View {
+        content
+            .padding(.leading, inset)
+            .background(Palette.background)
+            .measureGeometry(for: CGFloat.self) { proxy in
+                guard let fold = proxy.fold, fold.height > fold.width, fold.midX < proxy.size.width / 2 else { return 0 }
+                return max(0, fold.maxX)
+            } action: { inset = $0 }
+    }
+}
+
+/// A navigation stack with a close button, for a list presented on its own.
+struct SheetStack<Content: View>: View {
+    @ViewBuilder let content: Content
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack { content.closeButton(dismiss) }
+    }
+}
+
+/// A leftward swipe over the open drawer, reported as it follows the finger. It begins only for
+/// a swipe that sets off sideways, to the left, from a point `accepts`: a scroll of the session
+/// list never starts it, so nothing here runs while the list scrolls. On the root view, as
+/// `DrawerEdgePan` is: pages presented above keep their own gestures.
+private struct DrawerClosePan: UIViewRepresentable {
+    let enabled: Bool
+    /// Whether a swipe that started here (in the window) may close the drawer.
+    let accepts: (CGPoint) -> Bool
+    let changed: (CGFloat) -> Void
+    /// Where the swipe would come to rest; 0 when it was cancelled.
+    let ended: (CGFloat) -> Void
+
+    func makeUIView(context: Context) -> Catcher { Catcher() }
+
+    func updateUIView(_ view: Catcher, context: Context) {
+        view.enabled = enabled
+        view.accepts = accepts
+        view.changed = changed
+        view.ended = ended
+    }
+
+    final class Catcher: UIView, UIGestureRecognizerDelegate {
+        var enabled = false
+        var accepts: (CGPoint) -> Bool = { _ in true }
+        var changed: (CGFloat) -> Void = { _ in }
+        var ended: (CGFloat) -> Void = { _ in }
+        private lazy var recognizer: UIPanGestureRecognizer = {
+            let recognizer = UIPanGestureRecognizer(target: self, action: #selector(panned))
+            recognizer.maximumNumberOfTouches = 1
+            recognizer.delegate = self
+            return recognizer
+        }()
+
+        override func didMoveToWindow() {
+            recognizer.view?.removeGestureRecognizer(recognizer)
+            window?.rootViewController?.view.addGestureRecognizer(recognizer)
+        }
+
+        override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            guard enabled, let view = recognizer.view else { return false }
+            let velocity = recognizer.velocity(in: view)
+            guard velocity.x < 0, abs(velocity.x) > abs(velocity.y) else { return false }
+            let now = recognizer.location(in: view), moved = recognizer.translation(in: view)
+            return accepts(CGPoint(x: now.x - moved.x, y: now.y - moved.y))
+        }
+
+        /// The list under the finger keeps its own pan; everything else gives way once this one begins.
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            other.view is UIScrollView
+        }
+
+        @objc private func panned(_ recognizer: UIPanGestureRecognizer) {
+            let translation = recognizer.translation(in: recognizer.view).x
+            switch recognizer.state {
+            case .began, .changed: changed(translation)
+            case .ended: ended(translation + recognizer.velocity(in: recognizer.view).x * 0.2)
+            default: ended(0)
+            }
+        }
+    }
+}
+
+/// A swipe from the screen's left edge, reported as it follows the finger. On the root view:
+/// sheets above it keep their own edges.
+private struct DrawerEdgePan: UIViewRepresentable {
+    let enabled: Bool
+    let changed: (CGFloat) -> Void
+    /// Where the swipe would come to rest; 0 when it was cancelled.
+    let ended: (CGFloat) -> Void
+
+    func makeUIView(context: Context) -> Catcher { Catcher() }
+
+    func updateUIView(_ view: Catcher, context: Context) {
+        view.enabled = enabled
+        view.changed = changed
+        view.ended = ended
+    }
+
+    final class Catcher: UIView, UIGestureRecognizerDelegate {
+        var enabled = true
+        var changed: (CGFloat) -> Void = { _ in }
+        var ended: (CGFloat) -> Void = { _ in }
+        private lazy var recognizer: UIScreenEdgePanGestureRecognizer = {
+            let recognizer = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(panned))
+            recognizer.edges = .left
+            recognizer.delegate = self
+            return recognizer
+        }()
+
+        override func didMoveToWindow() {
+            recognizer.view?.removeGestureRecognizer(recognizer)
+            window?.rootViewController?.view.addGestureRecognizer(recognizer)
+        }
+
+        override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool { enabled }
+
+        @objc private func panned(_ recognizer: UIScreenEdgePanGestureRecognizer) {
+            let translation = recognizer.translation(in: recognizer.view).x
+            switch recognizer.state {
+            case .began, .changed: changed(translation)
+            case .ended: ended(translation + recognizer.velocity(in: recognizer.view).x * 0.2)
+            default: ended(0)
+            }
+        }
+    }
+}
