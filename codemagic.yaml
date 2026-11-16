@@ -1,0 +1,65 @@
+workflows:
+  fish-pocket-ios16:
+    name: Fish Pocket 1.2 iOS16 unsigned IPA
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+    environment:
+      node: 24
+      xcode: latest
+      vars:
+        CODE_SIGNING_ALLOWED: "NO"
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: ios16-1.2.0
+          include: true
+    scripts:
+      - name: Toolchain report
+        script: |
+          set -e
+          xcodebuild -version
+          node --version
+          sw_vers
+      - name: xcodegen
+        script: |
+          set -e
+          command -v xcodegen >/dev/null || brew install xcodegen
+      - name: Native dependencies
+        script: |
+          set -e
+          bash scripts/fetch-nodejs-mobile.sh
+          bash scripts/fetch-python.sh
+          bash scripts/build-libgit2.sh
+          bash scripts/fetch-ffmpeg.sh
+          bash scripts/check-root-imports.sh
+      - name: Assemble engine
+        script: |
+          set -e
+          bash scripts/build-engine.sh
+          test -f app/build/nodejs-project/node_modules/node-addon-require-builtin-ios-arm64/index.js
+      - name: Generate project
+        script: |
+          set -e
+          cd app
+          xcodegen generate --quiet
+      - name: Build unsigned device app
+        script: |
+          set -o pipefail
+          cd app
+          xcodebuild -project DshIOS.xcodeproj -scheme DshIOS \
+            -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData -skipPackagePluginValidation \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
+            build 2>&1 | tee ../build-ios16.log | tail -n 200
+          grep -q 'BUILD SUCCEEDED' ../build-ios16.log
+      - name: Package IPA
+        script: |
+          set -e
+          python3 scripts/package-ios16.py
+          ls -lh FishPocket-1.2-ios16.ipa
+    artifacts:
+      - FishPocket-1.2-ios16.ipa
+      - build-ios16.log
+      - app/build/DerivedData/Build/Products/Release-iphoneos/ios16-binaries.json
